@@ -1,0 +1,29 @@
+{
+  "name": "small-mcq-exam",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k \"vite --host 127.0.0.1\" \"node server/app.js\"",
+    "start": "node server/app.js",
+    "build": "vite build && node scripts/build-site-worker.mjs",
+    "db:generate": "drizzle-kit generate"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.2.0",
+    "dotenv": "^16.6.1",
+    "drizzle-orm": "^0.45.3",
+    "express": "^5.1.0",
+    "express-session": "^1.18.2",
+    "hono": "^4.13.9",
+    "lit": "^3.3.1",
+    "multer": "^2.0.2",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.0",
+    "drizzle-kit": "^0.31.11",
+    "esbuild": "^0.28.2",
+    "vite": "^7.1.7"
+  }
+}

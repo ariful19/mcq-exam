@@ -1,0 +1,104 @@
+import Database from 'better-sqlite3';
+import fs from 'node:fs';
+import path from 'node:path';
+
+const databasePath = path.resolve(process.env.DB_PATH || 'data/mcq.db');
+fs.mkdirSync(path.dirname(databasePath), { recursive: true });
+
+export const db = new Database(databasePath);
+db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
+db.exec(`
+  CREATE TABLE IF NOT EXISTS questions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    question_text TEXT NOT NULL,
+    option_a TEXT NOT NULL,
+    option_b TEXT NOT NULL,
+    option_c TEXT NOT NULL,
+    option_d TEXT NOT NULL,
+    correct_option TEXT NOT NULL CHECK (correct_option IN ('A','B','C','D')),
+    category TEXT NOT NULL DEFAULT '',
+    difficulty TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS exams (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    duration_minutes INTEGER NOT NULL CHECK (duration_minutes > 0),
+    status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','published','closed')),
+    show_score INTEGER NOT NULL DEFAULT 0 CHECK (show_score IN (0,1)),
+    show_answers INTEGER NOT NULL DEFAULT 0 CHECK (show_answers IN (0,1)),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (show_answers = 0 OR show_score = 1)
+  );
+  CREATE TABLE IF NOT EXISTS exam_questions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    exam_id INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
+    question_id INTEGER NOT NULL REFERENCES questions(id) ON DELETE RESTRICT,
+    marks REAL NOT NULL DEFAULT 1,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (exam_id, question_id)
+  );
+  CREATE TABLE IF NOT EXISTS attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    exam_id INTEGER NOT NULL REFERENCES exams(id) ON DELETE RESTRICT,
+    access_token TEXT NOT NULL UNIQUE,
+    student_name TEXT NOT NULL,
+    roll_number TEXT NOT NULL,
+    email TEXT NOT NULL DEFAULT '',
+    started_at TEXT NOT NULL,
+    submitted_at TEXT,
+    score REAL,
+    status TEXT NOT NULL DEFAULT 'in_progress' CHECK (status IN ('in_progress','submitted','auto_submitted'))
+  );
+  CREATE TABLE IF NOT EXISTS answers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    attempt_id INTEGER NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
+    question_id INTEGER NOT NULL REFERENCES questions(id) ON DELETE RESTRICT,
+    selected_option TEXT CHECK (selected_option IN ('A','B','C','D')),
+    is_correct INTEGER CHECK (is_correct IN (0,1) OR is_correct IS NULL),
+    marks_awarded REAL NOT NULL DEFAULT 0,
+    UNIQUE (attempt_id, question_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_questions_category_difficulty ON questions(category, difficulty);
+  CREATE INDEX IF NOT EXISTS idx_attempts_exam ON attempts(exam_id, started_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_attempts_token ON attempts(access_token);
+`);
+
+const starterQuestions = [
+  ['What is the capital city of Bangladesh?', 'Chattogram', 'Dhaka', 'Khulna', 'Rajshahi', 'B', 'Bangladesh', 'Easy'],
+  ['Which is the national flower of Bangladesh?', 'Water lily', 'Rose', 'Marigold', 'Jasmine', 'A', 'Bangladesh', 'Easy'],
+  ['What is the currency of Bangladesh?', 'Rupee', 'Taka', 'Riyal', 'Yen', 'B', 'Bangladesh', 'Easy'],
+  ['Which planet is known as the Red Planet?', 'Venus', 'Jupiter', 'Mars', 'Mercury', 'C', 'Science', 'Easy'],
+  ['How many days are there in a leap year?', '364', '365', '366', '367', 'C', 'General Knowledge', 'Easy'],
+  ['Which ocean lies to the south of Bangladesh?', 'Atlantic Ocean', 'Indian Ocean', 'Pacific Ocean', 'Arctic Ocean', 'B', 'Geography', 'Easy'],
+  ['What is the largest planet in our solar system?', 'Earth', 'Saturn', 'Jupiter', 'Neptune', 'C', 'Science', 'Easy'],
+  ['Which language is primarily spoken in Brazil?', 'Spanish', 'Portuguese', 'French', 'Italian', 'B', 'World', 'Easy'],
+  ['What is the national animal of Bangladesh?', 'Royal Bengal tiger', 'Asian elephant', 'Leopard', 'Lion', 'A', 'Bangladesh', 'Easy'],
+  ['Which continent is the Sahara Desert located in?', 'Asia', 'South America', 'Africa', 'Australia', 'C', 'Geography', 'Easy'],
+];
+
+if (db.prepare('SELECT COUNT(*) AS count FROM questions').get().count === 0) {
+  const insert = db.prepare(`INSERT INTO questions
+    (question_text, option_a, option_b, option_c, option_d, correct_option, category, difficulty)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+  db.transaction(() => starterQuestions.forEach((question) => insert.run(...question)))();
+}
+
+if (db.prepare('SELECT COUNT(*) AS count FROM exams').get().count === 0) {
+  const questionIds = db.prepare('SELECT id FROM questions ORDER BY id LIMIT 10').all();
+  const createDemo = db.transaction(() => {
+    const exam = db.prepare(`INSERT INTO exams (title, description, duration_minutes, status, show_score, show_answers)
+      VALUES (?, ?, ?, 'published', 1, 1)`).run(
+      'Getting Started: General Knowledge',
+      'A short sample exam to help you explore the examination portal.',
+      15,
+    );
+    const attach = db.prepare('INSERT INTO exam_questions (exam_id, question_id, marks, sort_order) VALUES (?, ?, 1, ?)');
+    questionIds.forEach((row, index) => attach.run(exam.lastInsertRowid, row.id, index));
+  });
+  createDemo();
+}
+
+export { databasePath };

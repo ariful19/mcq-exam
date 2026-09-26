@@ -1,0 +1,130 @@
+import XLSX from 'xlsx';
+import fs from 'node:fs';
+const rows = [
+['What is the capital of Bangladesh?','Dhaka','Chattogram','Khulna','Rajshahi','Bangladesh'],
+['What is the currency of Bangladesh?','Taka','Rupee','Riyal','Rupiah','Bangladesh'],
+['What is the national flower of Bangladesh?','Water lily (Shapla)','Rose','Marigold','Jasmine','Bangladesh'],
+['Which animal is the national animal of Bangladesh?','Royal Bengal tiger','Asian elephant','Leopard','Lion','Bangladesh'],
+['What is the national fruit of Bangladesh?','Jackfruit','Mango','Banana','Pineapple','Bangladesh'],
+['What is the national fish of Bangladesh?','Hilsa','Rohu','Catla','Pomfret','Bangladesh'],
+['What is the national bird of Bangladesh?','Oriental magpie-robin (Doel)','Kingfisher','Parrot','Crow','Bangladesh'],
+['Which sea lies south of Bangladesh?','Bay of Bengal','Arabian Sea','South China Sea','Red Sea','Bangladesh'],
+['Which mangrove forest is shared by Bangladesh and India?','The Sundarbans','Amazon Rainforest','Black Forest','Congo Basin','Bangladesh'],
+['Which river flows through Dhaka?','Buriganga','Padma','Teesta','Karnaphuli','Bangladesh'],
+['What is the name of Bangladesh’s parliament?','Jatiya Sangsad','Lok Sabha','Majlis','Duma','Bangladesh'],
+['Which city is Bangladesh’s main seaport?','Chattogram','Sylhet','Rangpur','Mymensingh','Bangladesh'],
+['Which language is the official language of Bangladesh?','Bangla','Urdu','Hindi','Nepali','Bangladesh'],
+['On which date is International Mother Language Day observed?','21 February','26 March','16 December','1 May','Bangladesh'],
+['When is Bangladesh Independence Day?','26 March','21 February','16 December','7 March','Bangladesh'],
+['When is Victory Day in Bangladesh?','16 December','26 March','21 February','14 April','Bangladesh'],
+['What is the national anthem of Bangladesh called?','Amar Shonar Bangla','Jana Gana Mana','Mazi','God Save the King','Bangladesh'],
+['Who wrote the lyrics of Amar Shonar Bangla?','Rabindranath Tagore','Kazi Nazrul Islam','Jasimuddin','Michael Madhusudan Dutt','Bangladesh'],
+['What is the name of the large bridge over the Padma River?','Padma Bridge','Jamuna Bridge','Meghna Bridge','Teesta Bridge','Bangladesh'],
+['Which Bangladeshi city is famous for tea gardens?','Sylhet','Barishal','Bogura','Narayanganj','Bangladesh'],
+['Which district is widely known for its long natural sea beach at Cox’s Bazar?','Cox’s Bazar','Faridpur','Kushtia','Pabna','Bangladesh'],
+['Which UNESCO site in Bangladesh is an ancient Buddhist monastery?','Somapura Mahavihara','Lalbagh Fort','Ahsan Manzil','Star Mosque','Bangladesh'],
+['What is the name of Bangladesh’s national memorial near Dhaka?','National Martyrs’ Memorial','Shaheed Minar','Central Monument','Jatiya Sangsad','Bangladesh'],
+['Which crop is a major staple food in Bangladesh?','Rice','Oats','Rye','Barley','Bangladesh'],
+['What is the name of the traditional Bengali New Year celebration?','Pohela Boishakh','Durga Puja','Eid-ul-Fitr','Nabanna','Bangladesh'],
+['Which is the largest continent by area?','Asia','Africa','Europe','South America','World'],
+['Which is the smallest continent by area?','Australia','Europe','Antarctica','South America','World'],
+['Which is the largest ocean on Earth?','Pacific Ocean','Atlantic Ocean','Indian Ocean','Arctic Ocean','World'],
+['Which ocean lies between Africa and Australia?','Indian Ocean','Pacific Ocean','Atlantic Ocean','Arctic Ocean','World'],
+['Which is the highest mountain above sea level?','Mount Everest','K2','Kilimanjaro','Mont Blanc','World'],
+['Which river is traditionally regarded as the longest in Africa?','Nile','Congo','Niger','Zambezi','World'],
+['Which river flows through London?','Thames','Seine','Danube','Tiber','World'],
+['Which river flows through Paris?','Seine','Thames','Rhine','Tagus','World'],
+['What is the capital of Japan?','Tokyo','Kyoto','Osaka','Sapporo','World'],
+['What is the capital of Australia?','Canberra','Sydney','Melbourne','Perth','World'],
+['What is the capital of Canada?','Ottawa','Toronto','Vancouver','Montreal','World'],
+['What is the capital of Egypt?','Cairo','Alexandria','Giza','Luxor','World'],
+['What is the capital of Nepal?','Kathmandu','Pokhara','Lalitpur','Biratnagar','World'],
+['What is the capital of Thailand?','Bangkok','Phuket','Chiang Mai','Pattaya','World'],
+['What is the capital of South Korea?','Seoul','Busan','Incheon','Daegu','World'],
+['What is the capital of Italy?','Rome','Milan','Venice','Naples','World'],
+['What is the capital of Spain?','Madrid','Barcelona','Seville','Valencia','World'],
+['What is the capital of Kenya?','Nairobi','Mombasa','Kisumu','Nakuru','World'],
+['What is the capital of Brazil?','Brasília','Rio de Janeiro','São Paulo','Salvador','World'],
+['What is the capital of Argentina?','Buenos Aires','Córdoba','Rosario','Mendoza','World'],
+['What is the capital of Turkey?','Ankara','Istanbul','Izmir','Antalya','World'],
+['What is the capital of Saudi Arabia?','Riyadh','Jeddah','Mecca','Medina','World'],
+['What is the capital of New Zealand?','Wellington','Auckland','Christchurch','Hamilton','World'],
+['What is the capital of France?','Paris','Lyon','Marseille','Nice','World'],
+['What is the capital of the United States?','Washington, D.C.','New York City','Los Angeles','Chicago','World'],
+['Which country is shaped like a boot on many maps?','Italy','Portugal','Greece','Norway','World'],
+['Which country is home to the ancient city of Petra?','Jordan','Egypt','Lebanon','Iraq','World'],
+['Which country is famous for the pyramids at Giza?','Egypt','Mexico','Sudan','Greece','World'],
+['Which country is often called the Land of the Rising Sun?','Japan','China','Thailand','South Korea','World'],
+['Which country has the maple leaf on its national flag?','Canada','Austria','Denmark','Finland','World'],
+['Which country is home to the Eiffel Tower?','France','Belgium','Switzerland','Spain','World'],
+['Which country is home to the Great Barrier Reef?','Australia','Indonesia','South Africa','India','World'],
+['Which desert covers much of northern Africa?','Sahara','Gobi','Kalahari','Atacama','World'],
+['Which is the largest hot desert in the world?','Sahara','Gobi','Arabian Desert','Kalahari','World'],
+['Which continent contains the Amazon rainforest?','South America','Africa','Asia','Europe','World'],
+['On which continent is the country of Kenya?','Africa','Asia','Europe','South America','World'],
+['Which continent is the South Pole located on?','Antarctica','Europe','Asia','North America','World'],
+['What is the largest country in the world by area?','Russia','Canada','China','United States','World'],
+['Which country has the most people, according to recent UN estimates?','India','China','United States','Indonesia','World'],
+['Which sea separates Europe and Africa near Gibraltar?','Mediterranean Sea','Baltic Sea','Caribbean Sea','Coral Sea','World'],
+['Which strait separates Spain and Morocco?','Strait of Gibraltar','Bering Strait','Bosporus','Dover Strait','World'],
+['Which ocean borders the east coast of the United States?','Atlantic Ocean','Pacific Ocean','Indian Ocean','Arctic Ocean','World'],
+['Which ocean borders the west coast of the United States?','Pacific Ocean','Atlantic Ocean','Indian Ocean','Southern Ocean','World'],
+['Which planet is known as the Red Planet?','Mars','Venus','Jupiter','Mercury','Science'],
+['Which is the largest planet in our solar system?','Jupiter','Saturn','Earth','Neptune','Science'],
+['Which planet is closest to the Sun?','Mercury','Venus','Earth','Mars','Science'],
+['Which planet is famous for its prominent rings?','Saturn','Mars','Mercury','Venus','Science'],
+['What is the name of Earth’s natural satellite?','The Moon','Europa','Titan','Phobos','Science'],
+['Which gas do plants absorb from the air during photosynthesis?','Carbon dioxide','Oxygen','Nitrogen','Hydrogen','Science'],
+['Which gas do humans need to breathe to survive?','Oxygen','Carbon dioxide','Helium','Methane','Science'],
+['At what temperature does water freeze on the Celsius scale?','0°C','10°C','32°C','100°C','Science'],
+['At what temperature does water boil at sea level on the Celsius scale?','100°C','50°C','90°C','120°C','Science'],
+['What is the chemical symbol for water?','H₂O','CO₂','O₂','NaCl','Science'],
+['What is the chemical symbol for gold?','Au','Ag','Fe','Go','Science'],
+['What is the chemical symbol for oxygen?','O','Ox','Og','Om','Science'],
+['Which organ pumps blood around the human body?','Heart','Lungs','Liver','Kidneys','Science'],
+['Which organ helps humans breathe by taking in oxygen?','Lungs','Stomach','Heart','Pancreas','Science'],
+['How many bones does an adult human typically have?','206','106','306','260','Science'],
+['Which part of a plant usually absorbs water from the soil?','Roots','Flowers','Leaves','Fruit','Science'],
+['Which force pulls objects toward Earth?','Gravity','Magnetism','Friction','Electricity','Science'],
+['What is the closest star to Earth?','The Sun','Sirius','Polaris','Proxima Centauri','Science'],
+['Which instrument is used to measure temperature?','Thermometer','Barometer','Compass','Hygrometer','Science'],
+['What is the process by which liquid water changes into vapor called?','Evaporation','Condensation','Freezing','Melting','Science'],
+['Which vitamin can the skin produce with sunlight exposure?','Vitamin D','Vitamin C','Vitamin B12','Vitamin K','Science'],
+['Which animal is the largest mammal on Earth?','Blue whale','African elephant','Giraffe','Hippopotamus','Science'],
+['What do bees collect from flowers to make honey?','Nectar','Sand','Leaves','Tree bark','Science'],
+['How many sides does a triangle have?','Three','Four','Five','Six','General Knowledge'],
+['How many days are there in a leap year?','366','364','365','367','General Knowledge'],
+['How many minutes are in one hour?','60','30','90','100','General Knowledge'],
+['How many colors are traditionally named in a rainbow?','Seven','Five','Six','Eight','General Knowledge'],
+['Which shape has four equal sides and four right angles?','Square','Triangle','Circle','Pentagon','General Knowledge'],
+['Which musical instrument has black and white keys?','Piano','Trumpet','Drum','Flute','General Knowledge'],
+['Which sport uses a bat, ball, and wickets?','Cricket','Basketball','Tennis','Volleyball','General Knowledge'],
+['How many players from one team are on the field in association football?','11','7','9','15','General Knowledge'],
+['Which sport is played at Wimbledon?','Tennis','Cricket','Golf','Rugby','General Knowledge'],
+['What is the main ingredient in traditional Japanese miso soup?','Miso paste','Cocoa powder','Tomato paste','Peanut butter','General Knowledge'],
+['Which metal is liquid at ordinary room temperature?','Mercury','Iron','Aluminum','Copper','Science'],
+['Which language is primarily spoken in Brazil?','Portuguese','Spanish','French','Italian','World'],
+['What is the official language most widely used in Egypt?','Arabic','Greek','Persian','Turkish','World'],
+['Which famous clock tower is part of the Palace of Westminster in London?','Elizabeth Tower (Big Ben)','Leaning Tower of Pisa','Eiffel Tower','CN Tower','World'],
+];
+if (rows.length !== 105) throw new Error(`Expected 105 rows, got ${rows.length}`);
+const wb = XLSX.readFile('D:/Downloads/mcq-question-template.xlsx');
+const ws = wb.Sheets[wb.SheetNames[0]];
+const header = ['Question','Option A','Option B','Option C','Option D','Correct Answer','Category','Difficulty'];
+const output = [header];
+for (let i=0; i<rows.length; i++) {
+  const [q, correct, ...rest] = rows[i]; const cat = rest.pop();
+  const options = [correct, ...rest];
+  // Deterministic rotations distribute the correct answer across A-D.
+  const shift = (i * 3 + 1) % 4;
+  const ordered = options.slice(shift).concat(options.slice(0, shift));
+  const key = 'ABCD'[ordered.indexOf(correct)];
+  const medium = new Set([8,10,17,18,21,22,30,31,32,44,49,50,51,55,57,59,61,62,63,80]);
+  output.push([q, ...ordered, key, cat, medium.has(i) ? 'Medium' : 'Easy']);
+}
+ws['!ref'] = undefined;
+XLSX.utils.sheet_add_aoa(ws, output, {origin:'A1'});
+XLSX.writeFile(wb, 'verification/bangladesh-world-105-questions.xlsx');
+console.log(`Wrote ${rows.length} questions to verification/bangladesh-world-105-questions.xlsx`);
+
+
