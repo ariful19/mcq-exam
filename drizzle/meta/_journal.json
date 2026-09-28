@@ -8,6 +8,13 @@
       "when": 1790414214927,
       "tag": "0000_green_maggott",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1790610537489,
+      "tag": "0001_supreme_inertia",
+      "breakpoints": true
     }
   ]
 }

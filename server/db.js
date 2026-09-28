@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -19,6 +20,7 @@ db.exec(`
     correct_option TEXT NOT NULL CHECK (correct_option IN ('A','B','C','D')),
     category TEXT NOT NULL DEFAULT '',
     difficulty TEXT NOT NULL DEFAULT '',
+    explanation TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
   CREATE TABLE IF NOT EXISTS exams (
@@ -29,6 +31,8 @@ db.exec(`
     status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','published','closed')),
     show_score INTEGER NOT NULL DEFAULT 0 CHECK (show_score IN (0,1)),
     show_answers INTEGER NOT NULL DEFAULT 0 CHECK (show_answers IN (0,1)),
+    subject TEXT NOT NULL DEFAULT '',
+    negative_mark REAL NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CHECK (show_answers = 0 OR show_score = 1)
   );
@@ -47,6 +51,7 @@ db.exec(`
     student_name TEXT NOT NULL,
     roll_number TEXT NOT NULL,
     email TEXT NOT NULL DEFAULT '',
+    address TEXT NOT NULL DEFAULT '',
     started_at TEXT NOT NULL,
     submitted_at TEXT,
     score REAL,
@@ -61,10 +66,40 @@ db.exec(`
     marks_awarded REAL NOT NULL DEFAULT 0,
     UNIQUE (attempt_id, question_id)
   );
+  CREATE TABLE IF NOT EXISTS admin_auth (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    password_salt TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    session_version INTEGER NOT NULL DEFAULT 1
+  );
   CREATE INDEX IF NOT EXISTS idx_questions_category_difficulty ON questions(category, difficulty);
   CREATE INDEX IF NOT EXISTS idx_attempts_exam ON attempts(exam_id, started_at DESC);
   CREATE INDEX IF NOT EXISTS idx_attempts_token ON attempts(access_token);
 `);
+
+// Keep existing local databases usable when the application adds fields.
+// These additive migrations preserve all question, exam, and attempt records.
+function addColumnIfMissing(table, column, definition) {
+  const columns = db.pragma(`table_info(${table})`);
+  if (!columns.some((item) => item.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${definition}`);
+}
+
+db.transaction(() => {
+  addColumnIfMissing('questions', 'explanation', "explanation TEXT NOT NULL DEFAULT ''");
+  addColumnIfMissing('exams', 'subject', "subject TEXT NOT NULL DEFAULT ''");
+  addColumnIfMissing('exams', 'negative_mark', 'negative_mark REAL NOT NULL DEFAULT 0');
+  addColumnIfMissing('attempts', 'address', "address TEXT NOT NULL DEFAULT ''");
+})();
+
+// Seed the persistent administrator credential once. Later environment changes
+// do not silently overwrite a password changed from the application.
+if (!db.prepare('SELECT 1 FROM admin_auth WHERE id = 1').get()) {
+  const password = process.env.ADMIN_PASSWORD || 'admin123!';
+  const salt = crypto.randomBytes(16);
+  const hash = crypto.pbkdf2Sync(password, salt, 210000, 32, 'sha256');
+  db.prepare(`INSERT INTO admin_auth (id, password_salt, password_hash, session_version)
+    VALUES (1, ?, ?, 1)`).run(salt.toString('base64url'), hash.toString('base64url'));
+}
 
 const starterQuestions = [
   ['What is the capital city of Bangladesh?', 'Chattogram', 'Dhaka', 'Khulna', 'Rajshahi', 'B', 'Bangladesh', 'Easy'],

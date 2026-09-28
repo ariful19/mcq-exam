@@ -11,6 +11,7 @@ export const questions = sqliteTable('questions', {
   correct_option: text('correct_option').notNull(),
   category: text('category').notNull().default(''),
   difficulty: text('difficulty').notNull().default(''),
+  explanation: text('explanation').notNull().default(''),
   created_at: text('created_at').notNull().default(sql`CURRENT_TIMESTAMP`),
 }, (table) => [check('questions_correct_option_check', sql`${table.correct_option} IN ('A','B','C','D')`), index('idx_questions_category_difficulty').on(table.category, table.difficulty)]);
 
@@ -19,6 +20,8 @@ export const exams = sqliteTable('exams', {
   title: text('title').notNull(),
   description: text('description').notNull().default(''),
   duration_minutes: integer('duration_minutes').notNull(),
+  subject: text('subject').notNull().default(''),
+  negative_mark: real('negative_mark').notNull().default(0),
   status: text('status').notNull().default('draft'),
   show_score: integer('show_score').notNull().default(0),
   show_answers: integer('show_answers').notNull().default(0),
@@ -44,6 +47,7 @@ export const attempts = sqliteTable('attempts', {
   student_name: text('student_name').notNull(),
   roll_number: text('roll_number').notNull(),
   email: text('email').notNull().default(''),
+  address: text('address').notNull().default(''),
   started_at: text('started_at').notNull(),
   submitted_at: text('submitted_at'),
   score: real('score'),
@@ -70,3 +74,10 @@ export const siteMeta = sqliteTable('site_meta', {
   key: text('key').primaryKey(),
   value: text('value').notNull(),
 });
+
+export const adminAuth = sqliteTable('admin_auth', {
+  id: integer('id').primaryKey(),
+  password_salt: text('password_salt').notNull(),
+  password_hash: text('password_hash').notNull(),
+  session_version: integer('session_version').notNull().default(1),
+}, (table) => [check('admin_auth_singleton_check', sql`${table.id}=1`)]);

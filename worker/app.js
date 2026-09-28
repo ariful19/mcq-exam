@@ -5,8 +5,10 @@ import { CLIENT_ASSETS } from 'virtual:client-assets';
 
 const app = new Hono();
 const optionKeys = { A: 'option_a', B: 'option_b', C: 'option_c', D: 'option_d' };
-const templateHeaders = ['Question', 'Option A', 'Option B', 'Option C', 'Option D', 'Correct Answer', 'Category', 'Difficulty'];
+const templateHeaders = ['Question', 'Option A', 'Option B', 'Option C', 'Option D', 'Correct Answer', 'Category', 'Difficulty', 'Explanation'];
 const sessionSeconds = 8 * 60 * 60;
+const allowedNegativeMarks = [1, 0.25, 0.5];
+const passwordIterations = 210000;
 
 function apiError(c, status, error, details) {
   return c.json({ error, ...(details ? { details } : {}) }, status);
@@ -20,14 +22,65 @@ function normalizeQuestion(input = {}) {
     option_c: String(input.option_c ?? input['Option C'] ?? '').trim(),
     option_d: String(input.option_d ?? input['Option D'] ?? '').trim(),
     correct_option: String(input.correct_option ?? input['Correct Answer'] ?? '').trim().toUpperCase(),
-    category: String(input.category ?? input.Category ?? '').trim(),
+    category: String(input.category ?? input.Category ?? input.subject ?? input.Subject ?? '').trim(),
     difficulty: String(input.difficulty ?? input.Difficulty ?? '').trim(),
+    explanation: String(input.explanation ?? input.Explanation ?? '').trim(),
   };
   const errors = [];
   if (!question.question_text) errors.push('Question is required.');
   for (const letter of ['a', 'b', 'c', 'd']) if (!question[`option_${letter}`]) errors.push(`Option ${letter.toUpperCase()} is required.`);
   if (!['A', 'B', 'C', 'D'].includes(question.correct_option)) errors.push('Correct answer must be A, B, C or D.');
+  if (!question.category) errors.push('Subject is required.');
   return { question, errors };
+}
+
+function parseBulkQuestions(text, subject) {
+  const normalized = String(text ?? '').trim();
+  if (!normalized) return { questions: [], errors: ['Paste at least one formatted question.'] };
+  const blocks = normalized.split(/\r?\n\s*\r?\n/).map((block) => block.trim()).filter(Boolean);
+  const questions = [];
+  const errors = [];
+  if (blocks.length > 300) errors.push('A maximum of 300 questions can be imported at a time.');
+  blocks.forEach((block, blockIndex) => {
+    const lines = block.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0);
+    const questionNumber = blockIndex + 1;
+    const details = [];
+    const heading = lines[0]?.match(/^(\d+)[.)]\s+(.+)$/);
+    if (!heading) details.push('Use "N. Question" for the question line.');
+    else if (Number(heading[1]) !== questionNumber) details.push(`Question numbers must be sequential (expected ${questionNumber}).`);
+
+    const optionLines = lines.slice(1, 5);
+    const options = {};
+    for (const [offset, expected] of ['A', 'B', 'C', 'D'].entries()) {
+      const match = optionLines[offset]?.match(/^([A-D])[.)]\s*(.+)$/i);
+      if (!match || match[1].toUpperCase() !== expected) details.push(`Option ${expected} is required in order.`);
+      else options[`option_${expected.toLowerCase()}`] = match[2].trim();
+    }
+
+    let answer;
+    let explanation = '';
+    const answerLine = lines[5]?.match(/^Answer:\s*([A-D])\s*$/i);
+    if (!answerLine) details.push('Add "Answer: A", "Answer: B", "Answer: C" or "Answer: D".');
+    else answer = answerLine[1].toUpperCase();
+    if (lines[6]) {
+      const explanationLine = lines[6].match(/^Explanation:\s*(.*)$/i);
+      if (!explanationLine) details.push('Only an optional "Explanation: ..." line may follow the answer.');
+      else explanation = explanationLine[1].trim();
+    }
+    if (lines.length > 7) details.push('Each question block may contain only a question, four options, an answer and an optional explanation.');
+
+    const { question, errors: questionErrors } = normalizeQuestion({
+      question_text: heading?.[2] ?? '',
+      ...options,
+      correct_option: answer ?? '',
+      category: subject,
+      explanation,
+    });
+    details.push(...questionErrors);
+    if (details.length) details.forEach((error) => errors.push(`Question ${questionNumber}: ${error}`));
+    else questions.push(question);
+  });
+  return { questions, errors };
 }
 
 function b64url(bytes) {
@@ -45,8 +98,32 @@ async function sessionKey(secret) {
   return crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify']);
 }
 
-async function makeAdminToken(username, secret) {
-  const payload = b64url(new TextEncoder().encode(JSON.stringify({ username, exp: Math.floor(Date.now() / 1000) + sessionSeconds })));
+async function passwordHash(password, salt) {
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
+  const digest = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: fromB64url(salt), iterations: passwordIterations, hash: 'SHA-256' }, key, 256);
+  return b64url(new Uint8Array(digest));
+}
+
+function constantTimeEqual(leftValue, rightValue) {
+  const left = fromB64url(leftValue);
+  const right = fromB64url(rightValue);
+  let mismatch = left.length ^ right.length;
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) mismatch |= (left[index] || 0) ^ (right[index] || 0);
+  return mismatch === 0;
+}
+
+async function ensureAdminAuth(db, env) {
+  let auth = await db.prepare('SELECT id,password_salt,password_hash,session_version FROM admin_auth WHERE id=1').first();
+  if (auth || !env.ADMIN_PASSWORD) return auth;
+  const salt = b64url(crypto.getRandomValues(new Uint8Array(16)));
+  const hash = await passwordHash(String(env.ADMIN_PASSWORD), salt);
+  await db.prepare(`INSERT INTO admin_auth (id,password_salt,password_hash,session_version) VALUES (1,?,?,1)
+    ON CONFLICT(id) DO NOTHING`).bind(salt, hash).run();
+  return db.prepare('SELECT id,password_salt,password_hash,session_version FROM admin_auth WHERE id=1').first();
+}
+
+async function makeAdminToken(username, secret, sessionVersion) {
+  const payload = b64url(new TextEncoder().encode(JSON.stringify({ username, exp: Math.floor(Date.now() / 1000) + sessionSeconds, version: sessionVersion })));
   const signature = await crypto.subtle.sign('HMAC', await sessionKey(secret), new TextEncoder().encode(payload));
   return `${payload}.${b64url(new Uint8Array(signature))}`;
 }
@@ -61,7 +138,9 @@ async function adminUser(c) {
     const verified = await crypto.subtle.verify('HMAC', await sessionKey(c.env.SESSION_SECRET), fromB64url(signature), new TextEncoder().encode(payload));
     if (!verified) return null;
     const claims = JSON.parse(new TextDecoder().decode(fromB64url(payload)));
-    return claims.username === c.env.ADMIN_USERNAME && claims.exp > Math.floor(Date.now() / 1000) ? claims.username : null;
+    if (claims.username !== c.env.ADMIN_USERNAME || claims.exp <= Math.floor(Date.now() / 1000)) return null;
+    const auth = await ensureAdminAuth(c.env.DB, c.env);
+    return auth && claims.version === Number(auth.session_version) ? claims.username : null;
   } catch { return null; }
 }
 
@@ -77,12 +156,12 @@ async function ensureSeeded(db) {
   if (marker) return;
   const statements = [db.prepare("INSERT INTO site_meta (key,value) VALUES ('initial_seed','1') ON CONFLICT(key) DO NOTHING")];
   for (const q of seedData.questions) {
-    statements.push(db.prepare(`INSERT INTO questions (id,question_text,option_a,option_b,option_c,option_d,correct_option,category,difficulty,created_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`).bind(q.id,q.question_text,q.option_a,q.option_b,q.option_c,q.option_d,q.correct_option,q.category,q.difficulty,q.created_at));
+    statements.push(db.prepare(`INSERT INTO questions (id,question_text,option_a,option_b,option_c,option_d,correct_option,category,difficulty,explanation,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`).bind(q.id,q.question_text,q.option_a,q.option_b,q.option_c,q.option_d,q.correct_option,q.category,q.difficulty,q.explanation || '',q.created_at));
   }
   for (const e of seedData.exams) {
-    statements.push(db.prepare(`INSERT INTO exams (id,title,description,duration_minutes,status,show_score,show_answers,created_at)
-      VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`).bind(e.id,e.title,e.description,e.duration_minutes,e.status,e.show_score,e.show_answers,e.created_at));
+    statements.push(db.prepare(`INSERT INTO exams (id,title,description,duration_minutes,subject,negative_mark,status,show_score,show_answers,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`).bind(e.id,e.title,e.description,e.duration_minutes,e.subject || '',e.negative_mark || 0,e.status,e.show_score,e.show_answers,e.created_at));
   }
   for (const eq of seedData.exam_questions) {
     statements.push(db.prepare(`INSERT INTO exam_questions (exam_id,question_id,marks,sort_order)
@@ -92,7 +171,7 @@ async function ensureSeeded(db) {
 }
 
 async function getExamQuestions(db, examId) {
-  const { results = [] } = await db.prepare(`SELECT q.id,q.question_text,q.option_a,q.option_b,q.option_c,q.option_d,q.correct_option,
+  const { results = [] } = await db.prepare(`SELECT q.id,q.question_text,q.option_a,q.option_b,q.option_c,q.option_d,q.correct_option,q.explanation,q.category,
       eq.marks,eq.sort_order FROM exam_questions eq JOIN questions q ON q.id=eq.question_id
     WHERE eq.exam_id=? ORDER BY eq.sort_order,eq.id`).bind(examId).all();
   return results;
@@ -103,7 +182,7 @@ function deadlineFor(attempt) {
 }
 
 async function finalizeAttempt(db, attemptId, status) {
-  const attempt = await db.prepare('SELECT * FROM attempts WHERE id=?').bind(attemptId).first();
+  const attempt = await db.prepare('SELECT a.*,e.negative_mark FROM attempts a JOIN exams e ON e.id=a.exam_id WHERE a.id=?').bind(attemptId).first();
   if (!attempt || attempt.status !== 'in_progress') return;
   const [questions, answerResult] = await Promise.all([
     getExamQuestions(db, attempt.exam_id),
@@ -114,9 +193,10 @@ async function finalizeAttempt(db, attemptId, status) {
   const statements = [];
   for (const question of questions) {
     const answer = existing.get(question.id);
-    const correct = Boolean(answer?.selected_option && answer.selected_option === question.correct_option);
-    const marks = correct ? question.marks : 0;
-    if (correct) score += marks;
+    const answered = Boolean(answer?.selected_option);
+    const correct = Boolean(answered && answer.selected_option === question.correct_option);
+    const marks = correct ? question.marks : answered ? -Number(attempt.negative_mark || 0) : 0;
+    score += marks;
     if (answer) statements.push(db.prepare('UPDATE answers SET is_correct=?,marks_awarded=? WHERE id=?').bind(correct ? 1 : 0, marks, answer.id));
   }
   statements.push(db.prepare(`UPDATE attempts SET status=?,submitted_at=?,score=? WHERE id=? AND status='in_progress'`)
@@ -127,14 +207,14 @@ async function finalizeAttempt(db, attemptId, status) {
 async function enforceDeadline(db, attempt) {
   if (attempt?.status === 'in_progress' && Date.now() >= deadlineFor(attempt).getTime()) {
     await finalizeAttempt(db, attempt.id, 'auto_submitted');
-    return db.prepare(`SELECT a.*,e.title AS exam_title,e.duration_minutes,e.show_score,e.show_answers
+    return db.prepare(`SELECT a.*,e.title AS exam_title,e.duration_minutes,e.negative_mark,e.show_score,e.show_answers
       FROM attempts a JOIN exams e ON e.id=a.exam_id WHERE a.access_token=?`).bind(attempt.access_token).first();
   }
   return attempt;
 }
 
 async function getStudentAttempt(db, token) {
-  const attempt = await db.prepare(`SELECT a.*,e.title AS exam_title,e.duration_minutes,e.show_score,e.show_answers
+  const attempt = await db.prepare(`SELECT a.*,e.title AS exam_title,e.duration_minutes,e.negative_mark,e.show_score,e.show_answers
     FROM attempts a JOIN exams e ON e.id=a.exam_id WHERE a.access_token=?`).bind(token).first();
   return enforceDeadline(db, attempt);
 }
@@ -144,7 +224,7 @@ async function safeResult(db, attempt, detailed) {
   const result = { status: attempt.status, submittedAt: attempt.submitted_at };
   if (attempt.show_score) result.score = attempt.score;
   if (detailed && attempt.show_answers && attempt.show_score) {
-    result.answers = await db.prepare(`SELECT q.id AS question_id,q.question_text,q.option_a,q.option_b,q.option_c,q.option_d,q.correct_option,
+    result.answers = await db.prepare(`SELECT q.id AS question_id,q.question_text,q.option_a,q.option_b,q.option_c,q.option_d,q.correct_option,q.explanation,
         eq.marks,a.selected_option,a.is_correct,a.marks_awarded FROM exam_questions eq JOIN questions q ON q.id=eq.question_id
       LEFT JOIN answers a ON a.question_id=q.id AND a.attempt_id=? WHERE eq.exam_id=? ORDER BY eq.sort_order,eq.id`)
       .bind(attempt.id, attempt.exam_id).all().then((response) => response.results || []);
@@ -159,16 +239,33 @@ function lockHeader(token) {
 app.get('/api/health', (c) => c.json({ ok: true, database: 'D1' }));
 app.get('/api/admin/session', async (c) => c.json({ authenticated: Boolean(await adminUser(c)) }));
 app.post('/api/admin/login', async (c) => {
-  if (!c.env.ADMIN_USERNAME || !c.env.ADMIN_PASSWORD || !c.env.SESSION_SECRET) return apiError(c, 503, 'Admin login is not configured.');
+  if (!c.env.ADMIN_USERNAME || !c.env.SESSION_SECRET) return apiError(c, 503, 'Admin login is not configured.');
   let body;
   try { body = await c.req.json(); } catch { return apiError(c, 400, 'Enter your username and password.'); }
-  const submitted = `${String(body?.username ?? '')}\0${String(body?.password ?? '')}`;
-  const expected = `${c.env.ADMIN_USERNAME}\0${c.env.ADMIN_PASSWORD}`;
-  let mismatch = submitted.length ^ expected.length;
-  for (let index = 0; index < Math.max(submitted.length, expected.length); index += 1) mismatch |= (submitted.charCodeAt(index) || 0) ^ (expected.charCodeAt(index) || 0);
-  if (mismatch) return apiError(c, 401, 'The username or password is incorrect.');
-  const token = await makeAdminToken(c.env.ADMIN_USERNAME, c.env.SESSION_SECRET);
+  const auth = await ensureAdminAuth(c.env.DB, c.env);
+  if (!auth) return apiError(c, 503, 'Admin login is not configured.');
+  const submittedPassword = String(body?.password ?? '');
+  const submittedHash = await passwordHash(submittedPassword, auth.password_salt);
+  if (String(body?.username ?? '') !== c.env.ADMIN_USERNAME || !constantTimeEqual(submittedHash, auth.password_hash)) {
+    return apiError(c, 401, 'The username or password is incorrect.');
+  }
+  const token = await makeAdminToken(c.env.ADMIN_USERNAME, c.env.SESSION_SECRET, Number(auth.session_version));
   return c.json({ authenticated: true }, 200, { 'Set-Cookie': lockHeader(token) });
+});
+app.post('/api/admin/password', requireAdmin, async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const currentPassword = String(body.current_password ?? '');
+  const newPassword = String(body.new_password ?? '');
+  if (newPassword.length < 12 || newPassword.length > 128) return apiError(c, 400, 'New password must be 12 to 128 characters.');
+  const auth = await ensureAdminAuth(c.env.DB, c.env);
+  if (!auth || !constantTimeEqual(await passwordHash(currentPassword, auth.password_salt), auth.password_hash)) {
+    return apiError(c, 401, 'The current password is incorrect.');
+  }
+  const salt = b64url(crypto.getRandomValues(new Uint8Array(16)));
+  const hash = await passwordHash(newPassword, salt);
+  await c.env.DB.prepare(`UPDATE admin_auth SET password_salt=?,password_hash=?,session_version=session_version+1 WHERE id=1`)
+    .bind(salt, hash).run();
+  return c.json({ ok: true }, 200, { 'Set-Cookie': 'mcq.sid=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0' });
 });
 app.post('/api/admin/logout', requireAdmin, (c) => c.json({ ok: true }, 200, {
   'Set-Cookie': 'mcq.sid=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0',
@@ -182,6 +279,15 @@ app.get('/api/exams', async (c) => {
   return c.json(results);
 });
 
+app.get('/api/exams/:id', async (c) => {
+  await ensureSeeded(c.env.DB);
+  const exam = await c.env.DB.prepare(`SELECT e.id,e.title,e.description,e.subject,e.duration_minutes,e.negative_mark,e.created_at,
+      COUNT(eq.id) AS question_count FROM exams e LEFT JOIN exam_questions eq ON eq.exam_id=e.id
+    WHERE e.id=? AND e.status='published' GROUP BY e.id`).bind(Number(c.req.param('id'))).first();
+  if (!exam) return apiError(c, 404, 'This examination is not available.');
+  return c.json(exam);
+});
+
 app.get('/api/admin/questions', requireAdmin, async (c) => {
   await ensureSeeded(c.env.DB);
   const { results = [] } = await c.env.DB.prepare(`SELECT q.*,
@@ -192,9 +298,21 @@ app.get('/api/admin/questions', requireAdmin, async (c) => {
 app.post('/api/admin/questions', requireAdmin, async (c) => {
   const { question, errors } = normalizeQuestion(await c.req.json().catch(() => ({})));
   if (errors.length) return apiError(c, 400, 'Please correct the question details.', errors);
-  const result = await c.env.DB.prepare(`INSERT INTO questions (question_text,option_a,option_b,option_c,option_d,correct_option,category,difficulty)
-    VALUES (?,?,?,?,?,?,?,?)`).bind(question.question_text,question.option_a,question.option_b,question.option_c,question.option_d,question.correct_option,question.category,question.difficulty).run();
+  const result = await c.env.DB.prepare(`INSERT INTO questions (question_text,option_a,option_b,option_c,option_d,correct_option,category,difficulty,explanation)
+    VALUES (?,?,?,?,?,?,?,?,?)`).bind(question.question_text,question.option_a,question.option_b,question.option_c,question.option_d,question.correct_option,question.category,question.difficulty,question.explanation).run();
   return c.json(await c.env.DB.prepare('SELECT * FROM questions WHERE id=?').bind(result.meta.last_row_id).first(), 201);
+});
+
+app.post('/api/admin/questions/bulk', requireAdmin, async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const subject = String(body.subject ?? '').trim();
+  if (!subject) return apiError(c, 400, 'Subject is required.');
+  const { questions, errors } = parseBulkQuestions(body.text, subject);
+  if (errors.length) return apiError(c, 400, 'Please use the required question format. No questions were imported.', errors);
+  await c.env.DB.batch(questions.map((question) => c.env.DB.prepare(`INSERT INTO questions
+    (question_text,option_a,option_b,option_c,option_d,correct_option,category,difficulty,explanation) VALUES (?,?,?,?,?,?,?,?,?)`)
+    .bind(question.question_text,question.option_a,question.option_b,question.option_c,question.option_d,question.correct_option,question.category,question.difficulty,question.explanation)));
+  return c.json({ imported: questions.length });
 });
 
 app.put('/api/admin/questions/:id', requireAdmin, async (c) => {
@@ -204,8 +322,8 @@ app.put('/api/admin/questions/:id', requireAdmin, async (c) => {
   if (await c.env.DB.prepare('SELECT 1 FROM exam_questions WHERE question_id=? LIMIT 1').bind(id).first()) return apiError(c, 409, 'This question belongs to an exam and can no longer be edited.');
   const { question, errors } = normalizeQuestion(await c.req.json().catch(() => ({})));
   if (errors.length) return apiError(c, 400, 'Please correct the question details.', errors);
-  await c.env.DB.prepare(`UPDATE questions SET question_text=?,option_a=?,option_b=?,option_c=?,option_d=?,correct_option=?,category=?,difficulty=? WHERE id=?`)
-    .bind(question.question_text,question.option_a,question.option_b,question.option_c,question.option_d,question.correct_option,question.category,question.difficulty,id).run();
+  await c.env.DB.prepare(`UPDATE questions SET question_text=?,option_a=?,option_b=?,option_c=?,option_d=?,correct_option=?,category=?,difficulty=?,explanation=? WHERE id=?`)
+    .bind(question.question_text,question.option_a,question.option_b,question.option_c,question.option_d,question.correct_option,question.category,question.difficulty,question.explanation,id).run();
   return c.json(await c.env.DB.prepare('SELECT * FROM questions WHERE id=?').bind(id).first());
 });
 
@@ -231,7 +349,12 @@ app.get('/api/admin/questions/template', requireAdmin, (c) => {
 
 app.post('/api/admin/questions/import', requireAdmin, async (c) => {
   let file;
-  try { file = (await c.req.raw.formData()).get('file'); } catch { return apiError(c, 400, 'Choose an Excel workbook to import.'); }
+  let uploadSubject = '';
+  try {
+    const form = await c.req.raw.formData();
+    file = form.get('file');
+    uploadSubject = String(form.get('subject') ?? '').trim();
+  } catch { return apiError(c, 400, 'Choose an Excel workbook to import.'); }
   if (!file || typeof file.arrayBuffer !== 'function') return apiError(c, 400, 'Choose an Excel workbook to import.');
   if (file.size > 8 * 1024 * 1024) return apiError(c, 413, 'The workbook must be smaller than 8 MB.');
   let rows;
@@ -248,7 +371,8 @@ app.post('/api/admin/questions/import', requireAdmin, async (c) => {
   for (let index = 1; index < rows.length; index += 1) {
     const cells = rows[index];
     if (cells.every((value) => String(value ?? '').trim() === '')) continue;
-    const input = Object.fromEntries(templateHeaders.map((header) => [header, cells[headerIndexes.get(header.toLowerCase())] ?? '']));
+    const input = Object.fromEntries(templateHeaders.map((header) => [header, headerIndexes.has(header.toLowerCase()) ? (cells[headerIndexes.get(header.toLowerCase())] ?? '') : '']));
+    if (!String(input.Category ?? '').trim()) input.Category = uploadSubject;
     const { question, errors: rowErrors } = normalizeQuestion(input);
     rowErrors.forEach((error) => errors.push(`Row ${index + 1}: ${error}`));
     imported.push(question);
@@ -257,8 +381,8 @@ app.post('/api/admin/questions/import', requireAdmin, async (c) => {
   if (!imported.length && !errors.length) errors.push('No populated question rows were found.');
   if (errors.length) return apiError(c, 400, 'The workbook has validation errors. No questions were imported.', errors);
   await c.env.DB.batch(imported.map((q) => c.env.DB.prepare(`INSERT INTO questions
-    (question_text,option_a,option_b,option_c,option_d,correct_option,category,difficulty) VALUES (?,?,?,?,?,?,?,?)`)
-    .bind(q.question_text,q.option_a,q.option_b,q.option_c,q.option_d,q.correct_option,q.category,q.difficulty)));
+    (question_text,option_a,option_b,option_c,option_d,correct_option,category,difficulty,explanation) VALUES (?,?,?,?,?,?,?,?,?)`)
+    .bind(q.question_text,q.option_a,q.option_b,q.option_c,q.option_d,q.correct_option,q.category,q.difficulty,q.explanation)));
   return c.json({ imported: imported.length });
 });
 
@@ -276,18 +400,22 @@ app.post('/api/admin/exams', requireAdmin, async (c) => {
   const title = String(body.title || '').trim();
   const description = String(body.description || '').trim();
   const duration = Number(body.duration_minutes);
+  const subject = String(body.subject ?? '').trim();
+  const negativeMark = Number(body.negative_mark);
   const status = ['draft','published','closed'].includes(body.status) ? body.status : 'draft';
   const showScore = body.show_score ? 1 : 0;
   const showAnswers = body.show_answers ? 1 : 0;
   const ids = Array.isArray(body.question_ids) ? [...new Set(body.question_ids.map(Number).filter(Number.isSafeInteger))] : [];
   if (!title) return apiError(c, 400, 'Exam title is required.');
+  if (!subject) return apiError(c, 400, 'Subject is required.');
+  if (!allowedNegativeMarks.includes(negativeMark)) return apiError(c, 400, 'Choose a negative mark of 1, 0.25, or 0.50.');
   if (!Number.isInteger(duration) || duration < 1 || duration > 1440) return apiError(c, 400, 'Duration must be between 1 and 1440 minutes.');
   if (showAnswers && !showScore) return apiError(c, 400, 'Show score must be enabled to show answer review.');
   if (!ids.length) return apiError(c, 400, 'Select at least one question for this exam.');
-  const available = await c.env.DB.prepare(`SELECT id FROM questions WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).all();
-  if ((available.results || []).length !== ids.length) return apiError(c, 400, 'One or more selected questions are no longer available. Refresh the question bank and try again.');
-  const created = await c.env.DB.prepare(`INSERT INTO exams (title,description,duration_minutes,status,show_score,show_answers) VALUES (?,?,?,?,?,?)`)
-    .bind(title,description,duration,status,showScore,showAnswers).run();
+  const available = await c.env.DB.prepare(`SELECT id FROM questions WHERE category=? AND id IN (${ids.map(() => '?').join(',')})`).bind(subject,...ids).all();
+  if ((available.results || []).length !== ids.length) return apiError(c, 400, 'Select only available questions from the chosen subject. Refresh the question bank and try again.');
+  const created = await c.env.DB.prepare(`INSERT INTO exams (title,description,duration_minutes,subject,negative_mark,status,show_score,show_answers) VALUES (?,?,?,?,?,?,?,?)`)
+    .bind(title,description,duration,subject,negativeMark,status,showScore,showAnswers).run();
   const examId = created.meta.last_row_id;
   await c.env.DB.batch(ids.map((questionId, index) => c.env.DB.prepare('INSERT INTO exam_questions (exam_id,question_id,marks,sort_order) VALUES (?,?,?,?)').bind(examId,questionId,1,index)));
   return c.json(await c.env.DB.prepare(`SELECT e.*,COUNT(eq.id) AS question_count FROM exams e
@@ -324,7 +452,7 @@ app.get('/api/admin/exams/:id/questions', requireAdmin, async (c) => {
 app.get('/api/admin/exams/:id/attempts', requireAdmin, async (c) => {
   const exam = await c.env.DB.prepare('SELECT id FROM exams WHERE id=?').bind(Number(c.req.param('id'))).first();
   if (!exam) return apiError(c, 404, 'Exam not found.');
-  const { results = [] } = await c.env.DB.prepare(`SELECT id,student_name,roll_number,email,started_at,submitted_at,score,status
+  const { results = [] } = await c.env.DB.prepare(`SELECT id,student_name,roll_number,email,address,started_at,submitted_at,score,status
     FROM attempts WHERE exam_id=? ORDER BY started_at DESC,id DESC`).bind(exam.id).all();
   return c.json(results);
 });
@@ -334,7 +462,7 @@ app.get('/api/admin/attempts/:id', requireAdmin, async (c) => {
     .bind(Number(c.req.param('id'))).first();
   if (!attempt) return apiError(c, 404, 'Attempt not found.');
   const { results: answers = [] } = await c.env.DB.prepare(`SELECT q.id AS question_id,q.question_text,q.option_a,q.option_b,q.option_c,q.option_d,q.correct_option,
-      eq.marks,a.selected_option,a.is_correct,a.marks_awarded FROM exam_questions eq JOIN questions q ON q.id=eq.question_id
+      q.explanation,eq.marks,a.selected_option,a.is_correct,a.marks_awarded FROM exam_questions eq JOIN questions q ON q.id=eq.question_id
     LEFT JOIN answers a ON a.question_id=q.id AND a.attempt_id=? WHERE eq.exam_id=? ORDER BY eq.sort_order,eq.id`)
     .bind(attempt.id,attempt.exam_id).all();
   return c.json({ ...attempt, answers });
@@ -349,13 +477,15 @@ app.post('/api/exams/:id/attempts', async (c) => {
   const studentName = String(body.student_name || '').trim();
   const rollNumber = String(body.roll_number || '').trim();
   const email = String(body.email || '').trim();
+  const address = String(body.address || '').trim();
   if (!studentName || studentName.length > 120) return apiError(c, 400, 'Enter your name (up to 120 characters).');
   if (!rollNumber || rollNumber.length > 60) return apiError(c, 400, 'Enter your roll number (up to 60 characters).');
-  if (email && (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) return apiError(c, 400, 'Enter a valid email address or leave it blank.');
+  if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return apiError(c, 400, 'Enter a valid email address.');
+  if (!address || address.length > 500) return apiError(c, 400, 'Enter your address (up to 500 characters).');
   const bytes = crypto.getRandomValues(new Uint8Array(32));
   const token = b64url(bytes);
-  const result = await c.env.DB.prepare(`INSERT INTO attempts (exam_id,access_token,student_name,roll_number,email,started_at)
-    VALUES (?,?,?,?,?,?)`).bind(exam.id,token,studentName,rollNumber,email,new Date().toISOString()).run();
+  const result = await c.env.DB.prepare(`INSERT INTO attempts (exam_id,access_token,student_name,roll_number,email,address,started_at)
+    VALUES (?,?,?,?,?,?,?)`).bind(exam.id,token,studentName,rollNumber,email,address,new Date().toISOString()).run();
   return c.json({ token, attempt_id: result.meta.last_row_id }, 201);
 });
 
@@ -371,7 +501,7 @@ app.get('/api/attempts/:token', async (c) => {
   const { results: answers = [] } = await c.env.DB.prepare('SELECT question_id,selected_option FROM answers WHERE attempt_id=?').bind(attempt.id).all();
   return c.json({
     id: attempt.id,exam_id: attempt.exam_id,exam_title: attempt.exam_title,student_name: attempt.student_name,
-    roll_number: attempt.roll_number,email: attempt.email,status: attempt.status,started_at: attempt.started_at,
+    roll_number: attempt.roll_number,email: attempt.email,address: attempt.address,status: attempt.status,started_at: attempt.started_at,
     deadline: deadline.toISOString(),remaining_seconds: Math.max(0,Math.floor((deadline.getTime()-Date.now())/1000)),
     questions,answers,result: await safeResult(c.env.DB,attempt,true),
   });
@@ -386,9 +516,11 @@ app.put('/api/attempts/:token/answers', async (c) => {
   const selectedOption = body.selected_option === null || body.selected_option === '' ? null : String(body.selected_option || '').toUpperCase();
   if (!['A','B','C','D',null].includes(selectedOption)) return apiError(c, 400, 'Choose option A, B, C or D.');
   if (!await c.env.DB.prepare('SELECT 1 FROM exam_questions WHERE exam_id=? AND question_id=?').bind(attempt.exam_id,questionId).first()) return apiError(c, 400, 'That question is not part of this examination.');
-  await c.env.DB.prepare(`INSERT INTO answers (attempt_id,question_id,selected_option) VALUES (?,?,?)
+  const saved = await c.env.DB.prepare(`INSERT INTO answers (attempt_id,question_id,selected_option)
+    SELECT a.id,?,? FROM attempts a WHERE a.id=? AND a.status='in_progress'
     ON CONFLICT(attempt_id,question_id) DO UPDATE SET selected_option=excluded.selected_option,is_correct=NULL,marks_awarded=0`)
-    .bind(attempt.id,questionId,selectedOption).run();
+    .bind(questionId,selectedOption,attempt.id).run();
+  if (!saved.meta.changes) return apiError(c, 409, 'This attempt has already been submitted.');
   return c.json({ ok: true });
 });
 

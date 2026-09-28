@@ -7,6 +7,7 @@
     "dev": "concurrently -k \"vite --host 127.0.0.1\" \"node server/app.js\"",
     "start": "node server/app.js",
     "build": "vite build && node scripts/build-site-worker.mjs",
+    "test": "npm run build && node --test tests/requirements.test.mjs",
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
