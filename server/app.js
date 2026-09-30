@@ -32,7 +32,7 @@ app.use(session({
 const questionInsert = db.prepare(`INSERT INTO questions
   (question_text, option_a, option_b, option_c, option_d, correct_option, category, difficulty, explanation)
   VALUES (@question_text, @option_a, @option_b, @option_c, @option_d, @correct_option, @category, @difficulty, @explanation)`);
-const questionById = db.prepare('SELECT * FROM questions WHERE id = ?');
+const questionById = db.prepare('SELECT * FROM questions WHERE archived=0 AND id = ?');
 const lockedQuestion = db.prepare('SELECT 1 FROM exam_questions WHERE question_id = ? LIMIT 1');
 const attemptByToken = db.prepare(`SELECT a.*, e.title AS exam_title, e.duration_minutes, e.show_score, e.show_answers
   FROM attempts a JOIN exams e ON e.id = a.exam_id WHERE a.access_token = ?`);
@@ -215,9 +215,17 @@ app.get('/api/exams/:id', (req, res) => {
   res.json(exam);
 });
 
+app.get('/api/admin/backup', requireAdmin, (_req, res) => {
+  const tables = ['questions', 'exams', 'exam_questions', 'attempts', 'answers', 'admin_auth'];
+  const data = db.transaction(() => Object.fromEntries(tables.map((table) => [table, db.prepare(`SELECT * FROM ${table}`).all()])))();
+  res.set('Cache-Control', 'no-store');
+  res.attachment(`mcq-backup-${new Date().toISOString().slice(0, 10)}.json`);
+  res.json({ format: 'mcq-database-backup', version: 1, created_at: new Date().toISOString(), tables: data });
+});
+
 app.get('/api/admin/questions', requireAdmin, (_req, res) => {
   const questions = db.prepare(`SELECT q.*, EXISTS(SELECT 1 FROM exam_questions eq WHERE eq.question_id = q.id) AS locked
-    FROM questions q ORDER BY q.id DESC`).all();
+    FROM questions q WHERE q.archived=0 ORDER BY q.id DESC`).all();
   res.json(questions);
 });
 
@@ -289,9 +297,16 @@ app.post('/api/admin/questions/bulk', requireAdmin, (req, res) => {
 app.put('/api/admin/questions/:id', requireAdmin, (req, res) => {
   const id = Number(req.params.id);
   if (!questionById.get(id)) return apiError(res, 404, 'Question not found.');
-  if (lockedQuestion.get(id)) return apiError(res, 409, 'This question belongs to an exam and can no longer be edited.');
   const { question, errors } = normalizedQuestion(req.body || {});
   if (errors.length) return apiError(res, 400, 'Please correct the question details.', errors);
+  if (lockedQuestion.get(id)) {
+    const replacement = db.transaction(() => {
+      const result = questionInsert.run(question);
+      db.prepare('UPDATE questions SET archived=1 WHERE id=?').run(id);
+      return questionById.get(result.lastInsertRowid);
+    })();
+    return res.json(replacement);
+  }
   db.prepare(`UPDATE questions SET question_text=@question_text, option_a=@option_a, option_b=@option_b,
     option_c=@option_c, option_d=@option_d, correct_option=@correct_option, category=@category, difficulty=@difficulty,
     explanation=@explanation
@@ -302,8 +317,7 @@ app.put('/api/admin/questions/:id', requireAdmin, (req, res) => {
 app.delete('/api/admin/questions/:id', requireAdmin, (req, res) => {
   const id = Number(req.params.id);
   if (!questionById.get(id)) return apiError(res, 404, 'Question not found.');
-  if (lockedQuestion.get(id)) return apiError(res, 409, 'This question belongs to an exam and can no longer be deleted.');
-  db.prepare('DELETE FROM questions WHERE id = ?').run(id);
+  db.prepare('UPDATE questions SET archived=1 WHERE id=?').run(id);
   res.json({ ok: true });
 });
 
@@ -382,7 +396,7 @@ app.post('/api/admin/exams', requireAdmin, (req, res) => {
   if (!Number.isInteger(duration) || duration < 1 || duration > 1440) return apiError(res, 400, 'Duration must be between 1 and 1440 minutes.');
   if (showAnswers && !showScore) return apiError(res, 400, 'Show score must be enabled to show answer review.');
   if (!ids.length) return apiError(res, 400, 'Select at least one question for this exam.');
-  const available = db.prepare(`SELECT id, category FROM questions WHERE id IN (${ids.map(() => '?').join(',')})`).all(...ids);
+  const available = db.prepare(`SELECT id, category FROM questions WHERE archived=0 AND id IN (${ids.map(() => '?').join(',')})`).all(...ids);
   if (available.length !== ids.length) return apiError(res, 400, 'One or more selected questions are no longer available. Refresh the question bank and try again.');
   if (available.some((question) => question.category !== subject)) {
     return apiError(res, 400, 'All selected questions must belong to the chosen subject.');
@@ -396,6 +410,22 @@ app.post('/api/admin/exams', requireAdmin, (req, res) => {
   })();
   res.status(201).json(db.prepare(`SELECT e.*, COUNT(eq.id) AS question_count FROM exams e
     LEFT JOIN exam_questions eq ON eq.exam_id=e.id WHERE e.id=? GROUP BY e.id`).get(examId));
+});
+
+app.delete('/api/admin/exams/:id', requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  if (!db.prepare('SELECT id FROM exams WHERE id=?').get(id)) return apiError(res, 404, 'Exam not found.');
+  db.transaction(() => {
+    db.prepare('DELETE FROM attempts WHERE exam_id=?').run(id);
+    db.prepare('DELETE FROM exams WHERE id=?').run(id);
+  })();
+  res.json({ ok: true });
+});
+
+app.delete('/api/admin/attempts/:id', requireAdmin, (req, res) => {
+  const result = db.prepare('DELETE FROM attempts WHERE id=?').run(Number(req.params.id));
+  if (!result.changes) return apiError(res, 404, 'Answer sheet not found.');
+  res.json({ ok: true });
 });
 
 app.patch('/api/admin/exams/:id/status', requireAdmin, (req, res) => {

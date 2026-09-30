@@ -3,6 +3,7 @@ import { check, index, integer, real, sqliteTable, text, uniqueIndex } from 'dri
 
 export const questions = sqliteTable('questions', {
   id: integer('id').primaryKey({ autoIncrement: true }),
+  archived: integer('archived').notNull().default(0),
   question_text: text('question_text').notNull(),
   option_a: text('option_a').notNull(),
   option_b: text('option_b').notNull(),

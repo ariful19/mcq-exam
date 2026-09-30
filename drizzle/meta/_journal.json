@@ -15,6 +15,13 @@
       "when": 1790610537489,
       "tag": "0001_supreme_inertia",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1790741670897,
+      "tag": "0002_long_clea",
+      "breakpoints": true
     }
   ]
 }

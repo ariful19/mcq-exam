@@ -66,7 +66,7 @@ All pasted questions are validated before any are saved. The app reports the num
 
 For Excel, download the template from the Question bank. Keep the first worksheet headers `Question`, `Option A`, `Option B`, `Option C`, `Option D`, and `Correct Answer`; `Category`, `Difficulty`, and `Explanation` are optional. Correct answers must be A, B, C, or D. Each row uses its own Category, or the subject chosen at upload when Category is blank. The full workbook is validated before one transaction imports it, with worksheet row numbers in errors.
 
-Questions used by any saved examination are locked against edits and deletion. They can still be selected for another exam. During exam creation, choose a subject, select its questions manually or randomly, set the duration, and choose a wrong-answer penalty of `1`, `0.25`, or `0.50` marks. Unanswered questions receive no penalty. Random selections are previewed and stored with the examination so every student receives the same set and order. Existing exams retain their original zero-penalty grading.
+Questions used by saved examinations can be edited or removed from the bank while existing examinations retain their original version. During exam creation, choose a subject, select its questions manually or randomly, set the duration, and choose a wrong-answer penalty of `1`, `0.25`, or `0.50` marks. Unanswered questions receive no penalty. Random selections are previewed and stored with the examination so every student receives the same set and order. Existing exams retain their original zero-penalty grading.
 
 Each published exam has a direct `/exam/<id>` link with a Copy link control. Students provide a name, roll number, email, and address before starting. The admin can choose whether students see their final score and answer review after submission. Explanations appear with answer review when available; the admin always sees full answer sheets.
 
@@ -79,3 +79,11 @@ Each published exam has a direct `/exam/<id>` link with a Copy link control. Stu
 - `worker/` and `db/` contain the equivalent Worker/D1 source for a future Sites deployment. This repository update does not publish that version.
 
 Admin APIs use a server-side session cookie. Student attempts use a random opaque token held in the browser session; answer choices are saved immediately. The server calculates each deadline from the attempt start time and exam duration, auto-submits expired attempts, and only includes scores and answer review allowed by the exam settings.
+
+## Admin deletion and backups
+
+Admins can delete an examination together with all its attempts and answers, or delete an individual answer sheet from its detail view. Both actions require confirmation and are permanent.
+
+Questions can be edited or removed from the bank even after use. Editing a used question creates a new bank version; existing exams and answer sheets retain the original question, answer key, and score. Removing a question from the bank also preserves its use in existing exams.
+
+The admin password/settings panel includes **Download database backup**. This downloads a versioned JSON export of all application tables, including archived questions, participant data, and admin credential hashes. Store it securely. This is a data export; there is currently no in-app restore flow. Hosted deployments must apply the latest Drizzle migration before using these features.

@@ -227,6 +227,40 @@ test('MCQ requirements work through the local API and persist in SQLite', { time
     response = await anonymous(`/api/attempts/${legacyToken}/submit`, { method: 'POST' });
     assert.equal(response.data.result.score, 0, 'Existing zero-penalty exams must keep their original grading.');
 
+    for (const route of ['/api/admin/backup', `/api/admin/exams/${examId}`, `/api/admin/attempts/${attempt.id}`]) {
+      assert.equal((await anonymous(route, { method: route.endsWith('backup') ? 'GET' : 'DELETE' })).status, 401);
+    }
+    const backup = await admin('/api/admin/backup');
+    assert.equal(backup.status, 200);
+    assert.equal(backup.data.format, 'mcq-database-backup');
+    assert.ok(backup.data.tables.answers.length > 0);
+    assert.ok(backup.data.tables.attempts.some((row) => row.id === attempt.id));
+    const original = sheet.data.answers.find((row) => row.question_id === manualId);
+    response = await admin(`/api/admin/questions/${manualId}`, { method: 'PUT', body: question('Changed bank question?', 'D', 'Integration QA') });
+    assert.equal(response.status, 200);
+    assert.notEqual(response.data.id, manualId);
+    const replacementId = response.data.id;
+    const preserved = (await admin(`/api/admin/attempts/${attempt.id}`)).data;
+    assert.equal(preserved.score, sheet.data.score);
+    assert.deepEqual(preserved.answers.find((row) => row.question_id === manualId), original);
+    assert.ok(!(await admin('/api/admin/questions')).data.some((row) => row.id === manualId));
+    assert.equal((await admin(`/api/admin/questions/${pasteId}`, { method: 'DELETE' })).status, 200);
+    assert.equal((await admin(`/api/admin/attempts/${attempt.id}`)).data.answers.length, sheet.data.answers.length);
+    assert.equal((await admin('/api/admin/exams', { method: 'POST', body: { ...examBody, question_ids: [pasteId] } })).status, 400);
+    assert.equal((await admin(`/api/admin/questions/${replacementId}`, { method: 'DELETE' })).status, 200);
+    assert.equal((await admin(`/api/admin/attempts/${attempt.id}`, { method: 'DELETE' })).status, 200);
+    assert.equal((await admin(`/api/admin/attempts/${attempt.id}`)).status, 404);
+    assert.equal((await anonymous(`/api/attempts/${token}`)).status, 404);
+    response = await anonymous(`/api/exams/${examId}/attempts`, { method: 'POST', body: identity });
+    const deletedToken = response.data.token;
+    assert.equal((await admin(`/api/admin/exams/${examId}`, { method: 'DELETE' })).status, 200);
+    assert.equal((await anonymous(`/api/exams/${examId}`)).status, 404);
+    assert.equal((await anonymous(`/api/attempts/${deletedToken}`)).status, 404);
+    const afterDelete = (await admin('/api/admin/backup')).data.tables;
+    assert.ok(!afterDelete.attempts.some((row) => row.exam_id === examId));
+    assert.ok(!afterDelete.answers.some((row) => row.attempt_id === attempt.id));
+    assert.ok(!afterDelete.exam_questions.some((row) => row.exam_id === examId));
+
     await stopServer(running.process);
     running = await startServer(databasePath);
     anonymous = client(running.base);
@@ -236,4 +270,68 @@ test('MCQ requirements work through the local API and persist in SQLite', { time
     await stopServer(running?.process);
     if (path.dirname(databasePath) === directory && directory.startsWith(os.tmpdir())) await rm(directory, { recursive: true, force: true });
   }
+});
+
+
+test('Hosted backend preserves question history and exports and deletes data', async () => {
+  const { default: Database } = await import('better-sqlite3');
+  const { readFileSync } = await import('node:fs');
+  const { default: worker } = await import('../dist/server/index.js');
+  const sqlite = new Database(':memory:');
+  sqlite.pragma('foreign_keys = ON');
+  for (const file of ['0000_green_maggott.sql', '0001_supreme_inertia.sql', '0002_long_clea.sql']) {
+    sqlite.exec(readFileSync(path.join(root, 'drizzle', file), 'utf8'));
+  }
+  const DB = {
+    prepare(sql) {
+      let params = [];
+      const statement = {
+        bind(...values) { params = values; return statement; },
+        first() { return sqlite.prepare(sql).get(...params) ?? null; },
+        all() { return { results: sqlite.prepare(sql).all(...params) }; },
+        run() { const result = sqlite.prepare(sql).run(...params); return { meta: { last_row_id: Number(result.lastInsertRowid), changes: result.changes } }; },
+        execute() { return sqlite.prepare(sql).reader ? statement.all() : statement.run(); },
+      };
+      return statement;
+    },
+    async batch(statements) { return sqlite.transaction(() => statements.map((statement) => statement.execute()))(); },
+  };
+  const env = { DB, ADMIN_USERNAME: 'admin', ADMIN_PASSWORD: 'workerPass123!', SESSION_SECRET: 'worker-test-secret' };
+  let cookie = '';
+  async function call(route, method = 'GET', body) {
+    return worker.fetch(new Request(`https://test.local${route}`, { method, headers: { Cookie: cookie, 'Content-Type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}) }), env);
+  }
+  try {
+    assert.equal((await call('/api/admin/backup')).status, 401);
+    const login = await call('/api/admin/login', 'POST', { username: 'admin', password: env.ADMIN_PASSWORD });
+    assert.equal(login.status, 200);
+    cookie = login.headers.get('set-cookie').split(';')[0];
+    const questions = await (await call('/api/admin/questions')).json();
+    const exam = sqlite.prepare('SELECT * FROM exams LIMIT 1').get();
+    const old = sqlite.prepare('SELECT q.* FROM questions q JOIN exam_questions eq ON eq.question_id=q.id WHERE eq.exam_id=? LIMIT 1').get(exam.id);
+    const edit = await call(`/api/admin/questions/${old.id}`, 'PUT', { ...old, question_text: 'Updated version', correct_option: 'D' });
+    assert.equal(edit.status, 200);
+    const replacement = await edit.json();
+    assert.notEqual(replacement.id, old.id);
+    assert.equal(sqlite.prepare('SELECT question_text FROM questions WHERE id=?').get(old.id).question_text, old.question_text);
+    assert.equal((await call(`/api/admin/questions/${replacement.id}`, 'DELETE')).status, 200);
+    sqlite.prepare("INSERT INTO attempts (exam_id,access_token,student_name,roll_number,email,address,started_at,status) VALUES (?,'test-token','Student','1','a@b.com','Dhaka',CURRENT_TIMESTAMP,'submitted')").run(exam.id);
+    const attemptId = Number(sqlite.prepare('SELECT id FROM attempts').get().id);
+    sqlite.prepare('INSERT INTO answers (attempt_id,question_id,selected_option) VALUES (?,?,?)').run(attemptId,old.id,'A');
+    const backup = await call('/api/admin/backup');
+    assert.match(backup.headers.get('content-disposition'), /attachment/);
+    assert.equal(backup.headers.get('cache-control'), 'no-store');
+    const data = await backup.json();
+    assert.equal(data.tables.answers.length, 1);
+    assert.ok(data.tables.questions.length >= questions.length);
+    assert.equal((await call(`/api/admin/attempts/${attemptId}`, 'DELETE')).status, 200);
+    assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM answers').get().count, 0);
+    sqlite.prepare("INSERT INTO attempts (exam_id,access_token,student_name,roll_number,started_at) VALUES (?,'second','Student','1',CURRENT_TIMESTAMP)").run(exam.id);
+    const remaining = sqlite.prepare('SELECT id FROM attempts').get().id;
+    sqlite.prepare('INSERT INTO answers (attempt_id,question_id) VALUES (?,?)').run(remaining, old.id);
+    assert.equal((await call(`/api/admin/exams/${exam.id}`, 'DELETE')).status, 200);
+    assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM attempts').get().count, 0);
+    assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM answers').get().count, 0);
+    assert.equal((await call(`/api/admin/exams/${exam.id}`, 'DELETE')).status, 404);
+  } finally { sqlite.close(); }
 });

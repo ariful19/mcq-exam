@@ -85,6 +85,7 @@ function addColumnIfMissing(table, column, definition) {
 }
 
 db.transaction(() => {
+  addColumnIfMissing('questions', 'archived', 'archived INTEGER NOT NULL DEFAULT 0');
   addColumnIfMissing('questions', 'explanation', "explanation TEXT NOT NULL DEFAULT ''");
   addColumnIfMissing('exams', 'subject', "subject TEXT NOT NULL DEFAULT ''");
   addColumnIfMissing('exams', 'negative_mark', 'negative_mark REAL NOT NULL DEFAULT 0');

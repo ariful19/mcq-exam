@@ -288,10 +288,18 @@ app.get('/api/exams/:id', async (c) => {
   return c.json(exam);
 });
 
+app.get('/api/admin/backup', requireAdmin, async (c) => {
+  const tables = ['questions', 'exams', 'exam_questions', 'attempts', 'answers', 'admin_auth', 'site_meta'];
+  const results = await c.env.DB.batch(tables.map((table) => c.env.DB.prepare(`SELECT * FROM ${table}`)));
+  c.header('Cache-Control', 'no-store');
+  c.header('Content-Disposition', `attachment; filename="mcq-backup-${new Date().toISOString().slice(0, 10)}.json"`);
+  return c.json({ format: 'mcq-database-backup', version: 1, created_at: new Date().toISOString(), tables: Object.fromEntries(tables.map((table, i) => [table, results[i].results])) });
+});
+
 app.get('/api/admin/questions', requireAdmin, async (c) => {
   await ensureSeeded(c.env.DB);
   const { results = [] } = await c.env.DB.prepare(`SELECT q.*,
-    EXISTS(SELECT 1 FROM exam_questions eq WHERE eq.question_id=q.id) AS locked FROM questions q ORDER BY q.id DESC`).all();
+    EXISTS(SELECT 1 FROM exam_questions eq WHERE eq.question_id=q.id) AS locked FROM questions q WHERE q.archived=0 ORDER BY q.id DESC`).all();
   return c.json(results);
 });
 
@@ -317,11 +325,18 @@ app.post('/api/admin/questions/bulk', requireAdmin, async (c) => {
 
 app.put('/api/admin/questions/:id', requireAdmin, async (c) => {
   const id = Number(c.req.param('id'));
-  const found = await c.env.DB.prepare('SELECT id FROM questions WHERE id=?').bind(id).first();
+  const found = await c.env.DB.prepare('SELECT id FROM questions WHERE archived=0 AND id=?').bind(id).first();
   if (!found) return apiError(c, 404, 'Question not found.');
-  if (await c.env.DB.prepare('SELECT 1 FROM exam_questions WHERE question_id=? LIMIT 1').bind(id).first()) return apiError(c, 409, 'This question belongs to an exam and can no longer be edited.');
   const { question, errors } = normalizeQuestion(await c.req.json().catch(() => ({})));
   if (errors.length) return apiError(c, 400, 'Please correct the question details.', errors);
+  if (await c.env.DB.prepare('SELECT 1 FROM exam_questions WHERE question_id=? LIMIT 1').bind(id).first()) {
+    const results = await c.env.DB.batch([
+      c.env.DB.prepare(`INSERT INTO questions (question_text,option_a,option_b,option_c,option_d,correct_option,category,difficulty,explanation)
+        VALUES (?,?,?,?,?,?,?,?,?)`).bind(question.question_text,question.option_a,question.option_b,question.option_c,question.option_d,question.correct_option,question.category,question.difficulty,question.explanation),
+      c.env.DB.prepare('UPDATE questions SET archived=1 WHERE id=?').bind(id),
+    ]);
+    return c.json(await c.env.DB.prepare('SELECT * FROM questions WHERE id=?').bind(results[0].meta.last_row_id).first());
+  }
   await c.env.DB.prepare(`UPDATE questions SET question_text=?,option_a=?,option_b=?,option_c=?,option_d=?,correct_option=?,category=?,difficulty=?,explanation=? WHERE id=?`)
     .bind(question.question_text,question.option_a,question.option_b,question.option_c,question.option_d,question.correct_option,question.category,question.difficulty,question.explanation,id).run();
   return c.json(await c.env.DB.prepare('SELECT * FROM questions WHERE id=?').bind(id).first());
@@ -329,9 +344,8 @@ app.put('/api/admin/questions/:id', requireAdmin, async (c) => {
 
 app.delete('/api/admin/questions/:id', requireAdmin, async (c) => {
   const id = Number(c.req.param('id'));
-  if (!await c.env.DB.prepare('SELECT id FROM questions WHERE id=?').bind(id).first()) return apiError(c, 404, 'Question not found.');
-  if (await c.env.DB.prepare('SELECT 1 FROM exam_questions WHERE question_id=? LIMIT 1').bind(id).first()) return apiError(c, 409, 'This question belongs to an exam and can no longer be deleted.');
-  await c.env.DB.prepare('DELETE FROM questions WHERE id=?').bind(id).run();
+  if (!await c.env.DB.prepare('SELECT id FROM questions WHERE archived=0 AND id=?').bind(id).first()) return apiError(c, 404, 'Question not found.');
+  await c.env.DB.prepare('UPDATE questions SET archived=1 WHERE id=?').bind(id).run();
   return c.json({ ok: true });
 });
 
@@ -412,7 +426,7 @@ app.post('/api/admin/exams', requireAdmin, async (c) => {
   if (!Number.isInteger(duration) || duration < 1 || duration > 1440) return apiError(c, 400, 'Duration must be between 1 and 1440 minutes.');
   if (showAnswers && !showScore) return apiError(c, 400, 'Show score must be enabled to show answer review.');
   if (!ids.length) return apiError(c, 400, 'Select at least one question for this exam.');
-  const available = await c.env.DB.prepare(`SELECT id FROM questions WHERE category=? AND id IN (${ids.map(() => '?').join(',')})`).bind(subject,...ids).all();
+  const available = await c.env.DB.prepare(`SELECT id FROM questions WHERE archived=0 AND category=? AND id IN (${ids.map(() => '?').join(',')})`).bind(subject,...ids).all();
   if ((available.results || []).length !== ids.length) return apiError(c, 400, 'Select only available questions from the chosen subject. Refresh the question bank and try again.');
   const created = await c.env.DB.prepare(`INSERT INTO exams (title,description,duration_minutes,subject,negative_mark,status,show_score,show_answers) VALUES (?,?,?,?,?,?,?,?)`)
     .bind(title,description,duration,subject,negativeMark,status,showScore,showAnswers).run();
@@ -420,6 +434,28 @@ app.post('/api/admin/exams', requireAdmin, async (c) => {
   await c.env.DB.batch(ids.map((questionId, index) => c.env.DB.prepare('INSERT INTO exam_questions (exam_id,question_id,marks,sort_order) VALUES (?,?,?,?)').bind(examId,questionId,1,index)));
   return c.json(await c.env.DB.prepare(`SELECT e.*,COUNT(eq.id) AS question_count FROM exams e
     LEFT JOIN exam_questions eq ON eq.exam_id=e.id WHERE e.id=? GROUP BY e.id`).bind(examId).first(), 201);
+});
+
+app.delete('/api/admin/exams/:id', requireAdmin, async (c) => {
+  const id = Number(c.req.param('id'));
+  if (!await c.env.DB.prepare('SELECT id FROM exams WHERE id=?').bind(id).first()) return apiError(c, 404, 'Exam not found.');
+  await c.env.DB.batch([
+    c.env.DB.prepare('DELETE FROM answers WHERE attempt_id IN (SELECT id FROM attempts WHERE exam_id=?)').bind(id),
+    c.env.DB.prepare('DELETE FROM attempts WHERE exam_id=?').bind(id),
+    c.env.DB.prepare('DELETE FROM exam_questions WHERE exam_id=?').bind(id),
+    c.env.DB.prepare('DELETE FROM exams WHERE id=?').bind(id),
+  ]);
+  return c.json({ ok: true });
+});
+
+app.delete('/api/admin/attempts/:id', requireAdmin, async (c) => {
+  const id = Number(c.req.param('id'));
+  if (!await c.env.DB.prepare('SELECT id FROM attempts WHERE id=?').bind(id).first()) return apiError(c, 404, 'Answer sheet not found.');
+  await c.env.DB.batch([
+    c.env.DB.prepare('DELETE FROM answers WHERE attempt_id=?').bind(id),
+    c.env.DB.prepare('DELETE FROM attempts WHERE id=?').bind(id),
+  ]);
+  return c.json({ ok: true });
 });
 
 app.patch('/api/admin/exams/:id/status', requireAdmin, async (c) => {
