@@ -647,3 +647,36 @@ button, a, input, select, textarea { -webkit-tap-highlight-color: transparent; }
   .question-actions .button { font-size: 12px; }
   .sheet-answers { grid-template-columns: 1fr; }
 }
+
+/* Native dialog keeps the editor centered in the viewport at any list position. */
+.question-dialog {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  width: min(900px, calc(100% - 32px));
+  max-width: none;
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
+  padding: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: #fdfcff;
+  color: var(--ink);
+  box-shadow: 0 24px 80px #17182e35;
+}
+.question-dialog::backdrop { background: #25283b75; backdrop-filter: blur(3px); }
+.question-dialog .question-editor { margin: 0; border: 0; border-radius: 0; }
+.question-dialog .editor-title { gap: 16px; }
+.question-dialog .icon-close { flex-shrink: 0; min-width: 40px; min-height: 40px; }
+@media (max-width: 600px) {
+  .question-dialog { width: calc(100% - 20px); max-height: calc(100vh - 20px); max-height: calc(100dvh - 20px); border-radius: 16px; }
+  .question-dialog .question-editor { padding: 18px 14px; }
+  .question-dialog .option-grid, .question-dialog .editor-bottom { grid-template-columns: 1fr; }
+  .question-dialog input, .question-dialog select, .question-dialog textarea { font-size: 16px; }
+  .question-dialog .editor-actions { flex-wrap: wrap; }
+  .question-dialog .editor-actions .button { min-height: 44px; }
+}
+
+.question-save-error { color: var(--red); font-size: 14px; line-height: 1.5; }

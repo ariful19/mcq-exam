@@ -82,6 +82,33 @@ class McqApp extends LitElement {
   disconnectedCallback() {
     super.disconnectedCallback();
     clearInterval(this.timer);
+    this.restoreQuestionScroll();
+  }
+
+  updated() {
+    const dialog = this.querySelector('.question-dialog');
+    const shouldOpen = this.questionFormOpen && this.page === 'admin' && this.adminTab === 'questions';
+    if (shouldOpen && dialog && !dialog.open) {
+      this.questionScrollOverflow = document.body.style.overflow;
+      document.body.style.overflow = 'hidden';
+      dialog.showModal();
+    } else if (!shouldOpen) {
+      if (dialog?.open) dialog.close();
+      this.restoreQuestionScroll();
+    }
+  }
+
+  restoreQuestionScroll() {
+    if (this.questionScrollOverflow !== undefined) {
+      document.body.style.overflow = this.questionScrollOverflow;
+      this.questionScrollOverflow = undefined;
+    }
+  }
+
+  closeQuestionForm() {
+    if (this.busy) return;
+    this.questionFormOpen = false;
+    this.requestUpdate();
   }
 
   async initialize() {
@@ -188,6 +215,7 @@ class McqApp extends LitElement {
 
   openQuestionForm(question = null) {
     this.editingQuestion = question;
+    this.questionSaveError = '';
     this.questionFormOpen = true;
     this.error = '';
     this.requestUpdate();
@@ -195,6 +223,7 @@ class McqApp extends LitElement {
 
   async saveQuestion(event) {
     event.preventDefault();
+    this.questionSaveError = '';
     const form = event.currentTarget;
     const values = Object.fromEntries(new FormData(form));
     const payload = {
@@ -210,7 +239,9 @@ class McqApp extends LitElement {
       this.questionFormOpen = false;
       await this.loadAdminData();
       this.notify(this.editingQuestion ? 'Question updated.' : 'Question added to the bank.');
-    } catch (error) { this.notify([error.message, ...(error.details || [])].join(' '), 'error'); }
+    } catch (error) {
+      this.questionSaveError = [error.message, ...(error.details || [])].join(' ');
+    }
     finally { this.busy = false; this.requestUpdate(); }
   }
 
@@ -546,6 +577,15 @@ class McqApp extends LitElement {
         ${this.page === 'admin' ? this.renderAdmin() : ''}
         ${this.page === 'exam' ? this.renderExam() : ''}
         ${this.page === 'result' ? this.renderStudentResult() : ''}
+        <dialog class="question-dialog" aria-labelledby="question-editor-title"
+          @cancel=${(event) => { event.preventDefault(); this.closeQuestionForm(); }}
+          @click=${(event) => {
+            if (event.target !== event.currentTarget) return;
+            const bounds = event.currentTarget.getBoundingClientRect();
+            if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) this.closeQuestionForm();
+          }}>
+          ${this.questionFormOpen ? this.renderQuestionForm() : ''}
+        </dialog>
         ${this.startingExam ? this.renderStartDialog() : ''}
         ${this.toast ? html`<div class="toast ${this.toast.kind}" role="status"><b>${this.toast.message}</b>${this.toast.details?.length ? html`<ul>${this.toast.details.map((detail) => html`<li>${detail}</li>`)}</ul>` : ''}</div>` : ''}
       </div>
@@ -643,7 +683,7 @@ class McqApp extends LitElement {
       ${this.adminTab === 'questions' ? html`
         <section class="admin-panel">
           <div class="panel-heading"><div><h2>Question bank</h2><p>Build and organize questions by subject. Every question can include an explanation.</p></div><div class="panel-actions question-bank-actions"><a class="button button-outline" href="/api/admin/questions/template" download>↓ <span>Download Excel template</span></a><label class="excel-subject-picker">Excel default subject <input name="excel_subject" list="subject-options" maxlength="80" placeholder="Optional fallback" /><datalist id="subject-options">${this.questionCategories.map((value) => html`<option value=${value}></option>`)}</datalist></label><label class="button button-outline upload-button">↑ <span>Import Excel</span><input type="file" accept=".xlsx,.xls" @change=${this.importWorkbook} aria-label="Import Excel question file" /></label><button class="button button-outline" @click=${() => { this.bulkImportOpen = !this.bulkImportOpen; this.requestUpdate(); }}>▤ <span>${this.bulkImportOpen ? 'Close paste' : 'Paste questions'}</span></button><button class="button button-primary" @click=${() => this.openQuestionForm()}>＋ <span>Add question</span></button></div></div><p class="excel-import-hint">Excel columns include Question, A–D, Correct Answer, optional Category, Explanation, and Difficulty. A row Category takes precedence over the optional default subject.</p>
-          ${this.questionFormOpen ? this.renderQuestionForm() : ''}
+
           ${this.bulkImportOpen ? this.renderBulkImport() : ''}
           <div class="filter-row"><label class="search-field"><span>⌕</span><input placeholder="Search questions or subjects…" .value=${this.searchText} @input=${(event) => { this.searchText = event.target.value; this.questionPage = 0; this.requestUpdate(); }} /></label>
             <select aria-label="Filter subject" .value=${this.categoryFilter} @change=${(event) => { this.categoryFilter = event.target.value; this.questionPage = 0; this.requestUpdate(); }}><option value="">All subjects</option>${this.questionCategories.map((value) => html`<option value=${value}>${value}</option>`)}</select>
@@ -657,12 +697,13 @@ class McqApp extends LitElement {
 
   renderQuestionForm() {
     const q = this.editingQuestion || {};
-    return keyed(q.id ?? 'new-question', html`<form class="question-editor" @submit=${this.saveQuestion}><div class="editor-title"><div><span class="eyebrow muted">QUESTION DETAILS</span><h3>${this.editingQuestion ? 'Edit question' : 'Add a question'}</h3></div><button type="button" class="icon-close" @click=${() => { this.questionFormOpen = false; this.requestUpdate(); }}>×</button></div>
-      <label class="full-field">Question<input name="question_text" required maxlength="2000" value=${q.question_text || ''} placeholder="Write a clear question" /></label>
+    return keyed(q.id ?? 'new-question', html`<form class="question-editor" @submit=${this.saveQuestion}><div class="editor-title"><div><span class="eyebrow muted">QUESTION DETAILS</span><h3 id="question-editor-title">${this.editingQuestion ? 'Edit question' : 'Add a question'}</h3></div><button type="button" class="icon-close" aria-label="Close question editor" ?disabled=${this.busy} @click=${this.closeQuestionForm}>×</button></div>
+      <label class="full-field">Question<input autofocus name="question_text" required maxlength="2000" value=${q.question_text || ''} placeholder="Write a clear question" /></label>
       <div class="option-grid">${letters.map((letter) => html`<label>Option ${letter}<input name="option_${letter.toLowerCase()}" required maxlength="500" value=${q[`option_${letter.toLowerCase()}`] || ''} placeholder="Enter option ${letter}" /></label>`)}</div>
       <div class="editor-bottom"><label>Correct answer<select name="correct_option">${letters.map((letter) => html`<option value=${letter} ?selected=${letter === (q.correct_option || 'A')}>Option ${letter}</option>`)}</select></label><label>Subject<input name="category" required maxlength="80" value=${q.category || ''} placeholder="e.g. Geography" /></label><label>Difficulty<select name="difficulty">${['', 'Easy', 'Medium', 'Hard'].map((difficulty) => html`<option value=${difficulty} ?selected=${difficulty === (q.difficulty || '')}>${difficulty || 'Choose…'}</option>`)}</select></label></div>
       <label class="full-field">Explanation <span class="optional-label">OPTIONAL</span><textarea name="explanation" rows="2" maxlength="2000" placeholder="Explain why the correct answer is right">${q.explanation || ''}</textarea></label>
-      <div class="editor-actions"><button type="button" class="button button-quiet" @click=${() => { this.questionFormOpen = false; this.requestUpdate(); }}>Cancel</button><button class="button button-primary" ?disabled=${this.busy}>${this.busy ? 'Saving…' : this.editingQuestion ? 'Save changes' : 'Add to question bank'}</button></div>
+      ${this.questionSaveError ? html`<p class="question-save-error" role="alert">${this.questionSaveError}</p>` : ''}
+      <div class="editor-actions"><button type="button" class="button button-quiet" ?disabled=${this.busy} @click=${this.closeQuestionForm}>Cancel</button><button class="button button-primary" ?disabled=${this.busy}>${this.busy ? 'Saving…' : this.editingQuestion ? 'Save changes' : 'Add to question bank'}</button></div>
     </form>`);
   }
 
