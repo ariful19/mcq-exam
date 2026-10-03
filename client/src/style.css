@@ -154,8 +154,8 @@ input[type=checkbox] { accent-color: var(--purple); }
 .search-field input, .compact-search input { min-height: 31px; padding: 0; border: 0; outline: 0; box-shadow: none; font-size: 12px; }
 .search-field input:focus, .compact-search input:focus { border: 0; box-shadow: none; }
 .results-count { margin-left: auto; color: #979cab; white-space: nowrap; font-size: 12px; }
-.table-scroll { overflow-x: auto; }
-.data-table { width: 100%; border-collapse: collapse; text-align: left; }
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; border-radius: 9px; }
+.data-table { width: 100%; min-width: 680px; border-collapse: collapse; text-align: left; }
 .data-table th { height: 39px; color: #989dac; font-size: 12px; font-weight: 700; letter-spacing: .8px; }
 .data-table td { height: 49px; border-top: 1px solid #f0f1f5; color: #777e8e; font-size: 12px; white-space: nowrap; }
 .question-table th:first-child { min-width: 320px; }
@@ -454,11 +454,30 @@ input[type=checkbox] { accent-color: var(--purple); }
 .exam-share-row a { min-width: 0; color: #6256c7; overflow-wrap: anywhere; text-decoration: none; }
 .exam-share-row a:hover { text-decoration: underline; }
 .exam-share-row.unavailable-share { color: #a2a5b0; background: #fafafd; }
+.settings-grid { display: flex; flex-direction: column; gap: 20px; }
+.portal-settings-panel { max-width: 780px; }
+.portal-settings-panel .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .password-panel { max-width: 620px; }
+.backup-panel { max-width: 620px; }
 .password-form { max-width: 410px; margin-top: 22px; }
 .password-form .field-help { margin-top: -3px; }
 .security-icon { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 10px; color: #685bd0; background: #f1efff; font-size: 17px; }
 .password-form .button { align-self: flex-start; }
+.attempts-header-actions { display: flex; align-items: center; gap: 12px; }
+.confirm-modal { width: min(100%, 480px); text-align: left; }
+.confirm-summary-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 18px 0; }
+.confirm-stat-card { display: flex; align-items: center; gap: 12px; padding: 14px; border-radius: 12px; border: 1px solid #e5e7eb; background: #fff; }
+.confirm-stat-card .stat-badge { width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center; font-weight: 700; font-size: 14px; flex-shrink: 0; }
+.confirm-stat-card.answered { border-color: #d1fae5; background: #f0fdf4; }
+.confirm-stat-card.answered .stat-badge { background: #10b981; color: white; }
+.confirm-stat-card.unanswered-warning { border-color: #fee2e2; background: #fef2f2; }
+.confirm-stat-card.unanswered-warning .stat-badge { background: #ef4444; color: white; }
+.confirm-stat-card.unanswered-zero { border-color: #e0e7ff; background: #eef2ff; }
+.confirm-stat-card.unanswered-zero .stat-badge { background: #6366f1; color: white; }
+.confirm-stat-card strong { font-family: Manrope, sans-serif; font-size: 18px; color: #1f2937; display: block; }
+.confirm-stat-card small { color: #6b7280; font-size: 11px; font-weight: 500; display: block; margin-top: 2px; }
+.confirm-notice { margin-bottom: 20px; padding: 12px 14px; border-radius: 10px; background: #f8fafc; border: 1px solid #e2e8f0; font-size: 12px; display: flex; align-items: flex-start; gap: 10px; color: #475569; line-height: 1.5; }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 15px; }
 .direct-exam-page { min-height: calc(100vh - 78px); padding: 38px 18px 20px; display: flex; flex-direction: column; align-items: center; }
 .direct-exam-card { width: min(100%, 650px); padding: 32px; border: 1px solid #e8e9f0; border-radius: 17px; background: #fff; box-shadow: 0 8px 30px #3036500a; }
 .direct-exam-heading { margin-top: 13px; display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }

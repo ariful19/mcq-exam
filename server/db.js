@@ -72,6 +72,10 @@ db.exec(`
     password_hash TEXT NOT NULL,
     session_version INTEGER NOT NULL DEFAULT 1
   );
+  CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
   CREATE INDEX IF NOT EXISTS idx_questions_category_difficulty ON questions(category, difficulty);
   CREATE INDEX IF NOT EXISTS idx_attempts_exam ON attempts(exam_id, started_at DESC);
   CREATE INDEX IF NOT EXISTS idx_attempts_token ON attempts(access_token);
@@ -136,5 +140,23 @@ if (db.prepare('SELECT COUNT(*) AS count FROM exams').get().count === 0) {
   });
   createDemo();
 }
+
+const defaultSettings = {
+  site_title: 'Northstar',
+  site_subtitle: 'EXAMINATION PORTAL',
+  hero_eyebrow: 'LEARN · PREPARE · ACHIEVE',
+  hero_title: 'Your next step starts here.',
+  hero_description: 'Focused assessments, a clear path forward. Choose an examination below when you’re ready.',
+  hero_tagline: 'A calm space to do your best work',
+  footer_copyright: 'Northstar Examination Portal',
+  footer_tagline: 'Thoughtful assessment, made simple ✦',
+};
+
+const insertSetting = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
+db.transaction(() => {
+  for (const [key, value] of Object.entries(defaultSettings)) {
+    insertSetting.run(key, value);
+  }
+})();
 
 export { databasePath };

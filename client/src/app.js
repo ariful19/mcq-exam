@@ -72,6 +72,19 @@ class McqApp extends LitElement {
     this.passwordError = '';
     this.passwordBusy = false;
     this.resumeToken = sessionStorage.getItem('mcq-attempt-token') || '';
+    this.settings = {
+      site_title: 'Northstar',
+      site_subtitle: 'EXAMINATION PORTAL',
+      hero_eyebrow: 'LEARN · PREPARE · ACHIEVE',
+      hero_title: 'Your next step starts here.',
+      hero_description: 'Focused assessments, a clear path forward. Choose an examination below when you’re ready.',
+      hero_tagline: 'A calm space to do your best work',
+      footer_copyright: 'Northstar Examination Portal',
+      footer_tagline: 'Thoughtful assessment, made simple ✦',
+    };
+    this.settingsBusy = false;
+    this.settingsError = '';
+    this.submitConfirmOpen = false;
   }
 
   connectedCallback() {
@@ -111,7 +124,25 @@ class McqApp extends LitElement {
     this.requestUpdate();
   }
 
+  async loadSettings() {
+    try {
+      const data = await api('/api/settings');
+      if (data && typeof data === 'object') {
+        this.settings = { ...this.settings, ...data };
+        this.updateDocumentTitle();
+        this.requestUpdate();
+      }
+    } catch { /* Fallback to default settings */ }
+  }
+
+  updateDocumentTitle() {
+    const brand = this.settings.site_title || 'Northstar';
+    const subtitle = this.settings.site_subtitle ? ` · ${this.settings.site_subtitle}` : '';
+    document.title = `${brand}${subtitle}`;
+  }
+
   async initialize() {
+    await this.loadSettings();
     const [exams, session] = await Promise.allSettled([
       api('/api/exams'),
       api('/api/admin/session'),
@@ -354,6 +385,31 @@ class McqApp extends LitElement {
     }
   }
 
+  async saveSettings(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const values = Object.fromEntries(new FormData(form));
+    this.settingsBusy = true;
+    this.settingsError = '';
+    this.requestUpdate();
+    try {
+      const updated = await api('/api/admin/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(values),
+      });
+      this.settings = { ...this.settings, ...updated };
+      this.updateDocumentTitle();
+      this.notify('Portal branding & settings saved successfully.');
+    } catch (error) {
+      this.settingsError = error.message;
+      this.notify(error.message, 'error');
+    } finally {
+      this.settingsBusy = false;
+      this.requestUpdate();
+    }
+  }
+
   async changePassword(event) {
     event.preventDefault();
     const form = event.currentTarget;
@@ -429,6 +485,33 @@ class McqApp extends LitElement {
     try { this.attempts = await api(`/api/admin/exams/${exam.id}/attempts`); }
     catch (error) { this.notify(error.message, 'error'); }
     this.requestUpdate();
+  }
+
+  exportAttemptsCsv(exam) {
+    if (!this.attempts?.length) return;
+    const headers = ['Roll Number', 'Student Name', 'Email', 'Address', 'Score', 'Total Questions', 'Status', 'Started At', 'Submitted At'];
+    const rows = this.attempts.map((attempt) => [
+      `"${String(attempt.roll_number || '').replace(/"/g, '""')}"`,
+      `"${String(attempt.student_name || '').replace(/"/g, '""')}"`,
+      `"${String(attempt.email || '').replace(/"/g, '""')}"`,
+      `"${String(attempt.address || '').replace(/"/g, '""')}"`,
+      attempt.score === null ? '' : attempt.score,
+      exam.question_count || '',
+      attempt.status || '',
+      attempt.started_at || '',
+      attempt.submitted_at || '',
+    ]);
+    const csvContent = '\uFEFF' + [headers.join(','), ...rows.map((row) => row.join(','))].join('\r\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${(exam.title || 'examination').replace(/[^a-z0-9_-]/gi, '_')}-results.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    this.notify('Results exported to CSV.');
   }
 
   async openAnswerSheet(attempt) {
@@ -530,10 +613,17 @@ class McqApp extends LitElement {
   async submitAttempt(auto = false) {
     if (!this.attempt || this.attempt.status !== 'in_progress' || this.busy) return;
     if (!auto) {
-      const unanswered = this.attempt.questions.length - Object.values(this.answers).filter(Boolean).length;
-      if (unanswered && !window.confirm(`You have ${unanswered} unanswered ${unanswered === 1 ? 'question' : 'questions'}. Submit anyway?`)) return;
+      this.submitConfirmOpen = true;
+      this.requestUpdate();
+      return;
     }
+    await this.executeSubmitAttempt(true);
+  }
+
+  async executeSubmitAttempt(auto = false) {
+    this.submitConfirmOpen = false;
     this.busy = true;
+    this.requestUpdate();
     try {
       await this.answerSaveQueue.catch(() => {});
       if (this.answerSaveError) {
@@ -587,14 +677,18 @@ class McqApp extends LitElement {
           ${this.questionFormOpen ? this.renderQuestionForm() : ''}
         </dialog>
         ${this.startingExam ? this.renderStartDialog() : ''}
+        ${this.submitConfirmOpen ? this.renderSubmitConfirmDialog() : ''}
         ${this.toast ? html`<div class="toast ${this.toast.kind}" role="status"><b>${this.toast.message}</b>${this.toast.details?.length ? html`<ul>${this.toast.details.map((detail) => html`<li>${detail}</li>`)}</ul>` : ''}</div>` : ''}
       </div>
     `;
   }
 
   renderHeader() {
+    const title = this.settings.site_title || 'Northstar';
+    const subtitle = this.settings.site_subtitle || 'EXAMINATION PORTAL';
+    const mark = title.charAt(0).toUpperCase();
     return html`<header class="site-header">
-      <button class="brand" @click=${this.newAttempt} aria-label="Northstar home"><span class="brand-mark">N</span><span>northstar<span class="brand-dot">.</span><small>EXAMINATION PORTAL</small></span></button>
+      <button class="brand" @click=${this.newAttempt} aria-label="${title} home"><span class="brand-mark">${mark}</span><span>${title.toLowerCase()}<span class="brand-dot">.</span><small>${subtitle.toUpperCase()}</small></span></button>
       <div class="header-actions">
         ${this.page === 'admin' ? html`<span class="admin-pill"><span class="status-dot"></span> Admin workspace</span>` : html`<span class="secure-label"><span class="shield">◆</span> Secure examination portal</span>`}
         ${this.page === 'admin' ? html`<button class="button button-quiet button-small" @click=${this.logout}>Sign out</button>` : html`<button class="button button-outline button-small" @click=${this.enterAdmin}>${this.adminLoggedIn ? 'Admin dashboard' : 'Admin sign in'} <span aria-hidden="true">↗</span></button>`}
@@ -606,10 +700,10 @@ class McqApp extends LitElement {
     return html`<main class="home-main">
       <section class="welcome-panel">
         <div class="welcome-copy">
-          <span class="eyebrow"><span class="eyebrow-line"></span> LEARN · PREPARE · ACHIEVE</span>
-          <h1>Your next step<br /><em>starts here.</em></h1>
-          <p>Focused assessments, a clear path forward. Choose an examination below when you’re ready.</p>
-          <div class="welcome-foot"><span class="soft-icon">✦</span> A calm space to do your best work</div>
+          <span class="eyebrow"><span class="eyebrow-line"></span> ${this.settings.hero_eyebrow || 'LEARN · PREPARE · ACHIEVE'}</span>
+          <h1>${this.settings.hero_title || 'Your next step starts here.'}</h1>
+          <p>${this.settings.hero_description || 'Focused assessments, a clear path forward. Choose an examination below when you’re ready.'}</p>
+          <div class="welcome-foot"><span class="soft-icon">✦</span> ${this.settings.hero_tagline || 'A calm space to do your best work'}</div>
         </div>
         <div class="welcome-art" aria-hidden="true">
           <div class="art-orbit orbit-one"></div><div class="art-orbit orbit-two"></div>
@@ -630,7 +724,7 @@ class McqApp extends LitElement {
           </article>`)}
         </div>` : html`<div class="empty-state exam-empty"><div class="empty-illustration">⌁</div><h3>Nothing scheduled just yet</h3><p>Published examinations will appear here when they’re ready.</p></div>`}
       </section>
-      <footer class="page-footer"><span>© ${new Date().getFullYear()} Northstar Examination Portal</span><span>Thoughtful assessment, made simple <b>✦</b></span></footer>
+      <footer class="page-footer"><span>© ${new Date().getFullYear()} ${this.settings.footer_copyright || 'Northstar Examination Portal'}</span><span>${this.settings.footer_tagline || 'Thoughtful assessment, made simple ✦'}</span></footer>
     </main>`;
   }
 
@@ -649,7 +743,7 @@ class McqApp extends LitElement {
         <label>Roll number<input name="roll_number" required maxlength="60" placeholder="Your roll number" /></label>
         <button class="button button-primary button-full" ?disabled=${this.busy}>${this.busy ? 'Preparing your exam…' : 'Begin examination'} <span>→</span></button>
       </form>
-    </section><footer class="login-footer">NORTHSTAR · EXAMINATION PORTAL</footer></main>`;
+    </section><footer class="login-footer">${(this.settings.site_title || 'NORTHSTAR').toUpperCase()} · ${(this.settings.site_subtitle || 'EXAMINATION PORTAL').toUpperCase()}</footer></main>`;
   }
 
   renderUnavailableExam() {
@@ -665,7 +759,7 @@ class McqApp extends LitElement {
           ${this.adminLoginError ? html`<div class="inline-error">${this.adminLoginError}</div>` : ''}
           <button class="button button-primary button-full" ?disabled=${this.busy}>${this.busy ? 'Signing in…' : 'Sign in securely'} <span aria-hidden="true">→</span></button>
         </form><div class="login-foot"><span>▣</span> Your session is protected and private</div>
-      </div><footer class="login-footer">NORTHSTAR · EXAMINATION PORTAL</footer>
+      </div><footer class="login-footer">${(this.settings.site_title || 'NORTHSTAR').toUpperCase()} · ${(this.settings.site_subtitle || 'EXAMINATION PORTAL').toUpperCase()}</footer>
     </main>`;
   }
 
@@ -718,15 +812,64 @@ class McqApp extends LitElement {
   }
 
   renderPasswordSettings() {
-    return html`<div class="settings-grid"><section class="admin-panel password-panel"><div class="panel-heading"><div><h2>Change admin password</h2><p>Choose a new password for your administrator account.</p></div><span class="security-icon">⌑</span></div>
-      <form class="stack-form password-form" @submit=${this.changePassword}>
-        <label>Current password<input name="current_password" type="password" autocomplete="current-password" required placeholder="Enter your current password" /></label>
-        <label>New password<input name="new_password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required placeholder="At least 12 characters" /><small class="field-help">Use 12–128 characters.</small></label>
-        <label>Confirm new password<input name="confirm_password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required placeholder="Enter the new password again" /></label>
-        ${this.passwordError ? html`<div class="inline-error">${this.passwordError}</div>` : ''}
-        <button class="button button-primary" ?disabled=${this.passwordBusy}>${this.passwordBusy ? 'Changing password…' : 'Change password'}</button>
-      </form>
-    </section><section class="admin-panel backup-panel"><div class="panel-heading"><div><span class="eyebrow">YOUR DATA</span><h2>Database backup</h2></div><span class="security-icon" aria-hidden="true">↓</span></div><p>Keep a copy of your question bank, examinations, and participant records in one download.</p><a class="button button-primary" href="/api/admin/backup" download>↓ Download backup</a><small class="field-help">Includes private participant data and admin credentials. Store the file securely.</small></section></div>`;
+    return html`<div class="settings-grid">
+      <section class="admin-panel portal-settings-panel">
+        <div class="panel-heading">
+          <div>
+            <span class="eyebrow">CUSTOMIZATION</span>
+            <h2>Portal branding & copy</h2>
+            <p>Customize the site name, subtitle, hero slogans, and footer text.</p>
+          </div>
+          <span class="security-icon">✦</span>
+        </div>
+        <form class="stack-form settings-form" @submit=${this.saveSettings}>
+          <div class="field-row">
+            <label>Application / Site title
+              <input name="site_title" required maxlength="80" .value=${this.settings.site_title || ''} placeholder="e.g. Northstar" />
+            </label>
+            <label>Brand subtitle (badge)
+              <input name="site_subtitle" required maxlength="80" .value=${this.settings.site_subtitle || ''} placeholder="e.g. EXAMINATION PORTAL" />
+            </label>
+          </div>
+          <div class="field-row">
+            <label>Hero eyebrow slogan
+              <input name="hero_eyebrow" required maxlength="120" .value=${this.settings.hero_eyebrow || ''} placeholder="e.g. LEARN · PREPARE · ACHIEVE" />
+            </label>
+            <label>Hero headline
+              <input name="hero_title" required maxlength="160" .value=${this.settings.hero_title || ''} placeholder="e.g. Your next step starts here." />
+            </label>
+          </div>
+          <label>Hero description
+            <textarea name="hero_description" rows="2" maxlength="500" placeholder="Brief welcome message for candidates">${this.settings.hero_description || ''}</textarea>
+          </label>
+          <div class="field-row">
+            <label>Hero tagline (bottom badge)
+              <input name="hero_tagline" maxlength="120" .value=${this.settings.hero_tagline || ''} placeholder="e.g. A calm space to do your best work" />
+            </label>
+            <label>Footer copyright text
+              <input name="footer_copyright" maxlength="120" .value=${this.settings.footer_copyright || ''} placeholder="e.g. Northstar Examination Portal" />
+            </label>
+          </div>
+          <label>Footer tagline
+            <input name="footer_tagline" maxlength="120" .value=${this.settings.footer_tagline || ''} placeholder="e.g. Thoughtful assessment, made simple ✦" />
+          </label>
+          ${this.settingsError ? html`<div class="inline-error">${this.settingsError}</div>` : ''}
+          <button class="button button-primary" ?disabled=${this.settingsBusy}>
+            ${this.settingsBusy ? 'Saving settings…' : 'Save portal settings'}
+          </button>
+        </form>
+      </section>
+      <section class="admin-panel password-panel"><div class="panel-heading"><div><h2>Change admin password</h2><p>Choose a new password for your administrator account.</p></div><span class="security-icon">⌑</span></div>
+        <form class="stack-form password-form" @submit=${this.changePassword}>
+          <label>Current password<input name="current_password" type="password" autocomplete="current-password" required placeholder="Enter your current password" /></label>
+          <label>New password<input name="new_password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required placeholder="At least 12 characters" /><small class="field-help">Use 12–128 characters.</small></label>
+          <label>Confirm new password<input name="confirm_password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required placeholder="Enter the new password again" /></label>
+          ${this.passwordError ? html`<div class="inline-error">${this.passwordError}</div>` : ''}
+          <button class="button button-primary" ?disabled=${this.passwordBusy}>${this.passwordBusy ? 'Changing password…' : 'Change password'}</button>
+        </form>
+      </section>
+      <section class="admin-panel backup-panel"><div class="panel-heading"><div><span class="eyebrow">YOUR DATA</span><h2>Database backup</h2></div><span class="security-icon" aria-hidden="true">↓</span></div><p>Keep a copy of your question bank, examinations, and participant records in one download.</p><a class="button button-primary" href="/api/admin/backup" download>↓ Download backup</a><small class="field-help">Includes private participant data and admin credentials. Store the file securely.</small></section>
+    </div>`;
   }
 
   renderExamsAdmin() {
@@ -744,7 +887,7 @@ class McqApp extends LitElement {
           <div class="selection-footer"><span><b>${this.selectionIds.length}</b> question${this.selectionIds.length === 1 ? '' : 's'} selected</span><span>1 mark each · −${Number(this.querySelector('[name="negative_mark"]')?.value || 1)} for a wrong answer</span></div>
             ${selectedQuestions.length ? html`<div class="selected-questions-preview" aria-label="Full selected question preview">${selectedQuestions.map((q, index) => html`<article class="selected-question-preview"><div class="selected-preview-heading"><span>${String(index + 1).padStart(2, '0')}</span><b>${q.question_text}</b></div><div class="selection-option-grid">${letters.map((letter) => html`<span class=${letter === q.correct_option ? 'selection-correct-option' : ''}><strong>${letter}.</strong> ${q[optionKeys[letter]]}${letter === q.correct_option ? html` <b class="correct-answer-label">✓ Correct answer</b>` : ''}</span>`)}</div>${q.explanation ? html`<small class="selection-explanation">Explanation: ${q.explanation}</small>` : ''}</article>`)}</div>` : ''}
           </fieldset>
-          <div class="field-row"><label>Wrong answer penalty<select name="negative_mark" required><option value="1">−1 mark</option><option value="0.25">−0.25 mark</option><option value="0.5">−0.50 mark</option></select><small class="field-help">Unanswered questions receive no penalty.</small></label><label>Initial status<select name="status"><option value="published">Published</option><option value="draft">Draft</option></select></label></div>
+          <div class="field-row"><label>Wrong answer penalty<select name="negative_mark" required><option value="0">0 marks (No penalty)</option><option value="1">−1 mark</option><option value="0.25">−0.25 mark</option><option value="0.5">−0.50 mark</option></select><small class="field-help">Unanswered questions receive no penalty.</small></label><label>Initial status<select name="status"><option value="published">Published</option><option value="draft">Draft</option></select></label></div>
           <div class="settings-row"><div class="result-settings"><span class="setting-title">Student results</span><label class="check-setting"><input name="show_score" type="checkbox" @change=${(event) => { const answerBox = this.querySelector('[name="show_answers"]'); if (answerBox) { answerBox.disabled = !event.target.checked; if (!event.target.checked) answerBox.checked = false; } }} /><span><b>Show final score</b><small>Students can see their total mark.</small></span></label><label class="check-setting"><input name="show_answers" type="checkbox" disabled /><span><b>Show answer review</b><small>Students can review correct answers and explanations.</small></span></label></div></div>
           <button class="button button-primary button-full" ?disabled=${this.busy}>${this.busy ? 'Creating examination…' : 'Create examination'} <span aria-hidden="true">→</span></button>
         </form>
@@ -760,14 +903,23 @@ class McqApp extends LitElement {
 
   renderAttempts(exam) {
     if (this.answerSheet && this.resultExam?.id === exam.id) return this.renderAnswerSheet();
-    return html`<div class="attempts-panel"><div class="attempts-heading"><b>Participants</b><span>${this.attempts.length} attempt${this.attempts.length === 1 ? '' : 's'}</span></div>${this.attempts.length ? html`<div class="attempt-list">${this.attempts.map((attempt) => html`<button class="attempt-row" @click=${() => this.openAnswerSheet(attempt)}><span class="attempt-avatar">${attempt.student_name.slice(0, 1).toUpperCase()}</span><span class="attempt-person"><b>${attempt.student_name}</b><small>Roll ${attempt.roll_number}${attempt.email ? ` · ${attempt.email}` : ''}</small></span><span class="attempt-score">${attempt.score === null ? '—' : `${attempt.score} / ${exam.question_count}`}</span><span class="status-tag ${attempt.status}">${attempt.status.replace('_', ' ')}</span><span class="row-arrow">→</span></button>`)}</div>` : html`<div class="empty-inline">No participants yet. Share the published exam link with students.</div>`}</div>`;
+    return html`<div class="attempts-panel">
+      <div class="attempts-heading">
+        <b>Participants</b>
+        <div class="attempts-header-actions">
+          <span>${this.attempts.length} attempt${this.attempts.length === 1 ? '' : 's'}</span>
+          ${this.attempts.length ? html`<button class="button button-outline button-small" @click=${() => this.exportAttemptsCsv(exam)}>↓ Export CSV</button>` : ''}
+        </div>
+      </div>
+      ${this.attempts.length ? html`<div class="attempt-list">${this.attempts.map((attempt) => html`<button class="attempt-row" @click=${() => this.openAnswerSheet(attempt)}><span class="attempt-avatar">${attempt.student_name.slice(0, 1).toUpperCase()}</span><span class="attempt-person"><b>${attempt.student_name}</b><small>Roll ${attempt.roll_number}${attempt.email ? ` · ${attempt.email}` : ''}</small></span><span class="attempt-score">${attempt.score === null ? '—' : `${attempt.score} / ${exam.question_count}`}</span><span class="status-tag ${attempt.status}">${attempt.status.replace('_', ' ')}</span><span class="row-arrow">→</span></button>`)}</div>` : html`<div class="empty-inline">No participants yet. Share the published exam link with students.</div>`}
+    </div>`;
   }
 
   renderAnswerSheet() {
     const sheet = this.answerSheet;
     const graded = sheet.status !== 'in_progress';
     return html`<div class="answer-sheet"><div class="sheet-header"><div><button class="back-link compact-back" @click=${() => { this.answerSheet = null; this.requestUpdate(); }}>← Participants</button><h3>${sheet.student_name}<span> · Roll ${sheet.roll_number}</span></h3><p>${sheet.exam_title} · ${sheet.email || 'No email provided'} · ${sheet.address || 'No address provided'}</p></div><div class="sheet-score"><b>${sheet.score}</b><small>FINAL SCORE</small></div></div><button class="button button-danger button-small" @click=${() => this.deleteAttempt(sheet)}>Delete answer sheet</button><div class="sheet-meta"><span class="status-tag ${sheet.status}">${sheet.status.replace('_', ' ')}</span><span>Penalty: −${Number(this.resultExam?.negative_mark || 0)} for wrong answers</span><span>Started ${this.formatDate(sheet.started_at)}</span><span>${sheet.submitted_at ? `Submitted ${this.formatDate(sheet.submitted_at)}` : 'Not submitted'}</span></div>
-      <div class="sheet-questions">${sheet.answers.map((answer, index) => html`<article class="sheet-question ${graded ? answer.is_correct ? 'is-correct' : 'is-wrong' : 'is-pending'}"><div class="sheet-q-head"><span>QUESTION ${String(index + 1).padStart(2, '0')}</span><span class=${graded ? answer.is_correct ? 'correct-text' : 'wrong-text' : 'pending-text'}>${graded ? answer.is_correct ? '✓ Correct' : answer.selected_option ? '× Incorrect' : 'Not answered' : 'Not graded'}</span></div><h4>${answer.question_text}</h4><div class="sheet-answers">${letters.map((letter) => html`<div class="sheet-option ${letter === answer.correct_option ? 'right-option' : ''} ${graded && letter === answer.selected_option && !answer.is_correct ? 'chosen-wrong' : ''}"><span>${letter}</span><span>${answer[optionKeys[letter]]}</span>${letter === answer.selected_option ? html`<small class="student-label">STUDENT</small>` : ''}${letter === answer.correct_option ? html`<small>CORRECT</small>` : ''}</div>`)}</div>${answer.explanation ? html`<p class="answer-explanation"><b>Explanation</b> ${answer.explanation}</p>` : ''}<div class="marks-row"><span>Student selected <b>${answer.selected_option ? `Option ${answer.selected_option}` : 'No answer'}</b></span><span>${graded ? `${answer.marks_awarded} / ${answer.marks} mark${answer.marks === 1 ? '' : 's'}` : 'Pending submission'}</span></div></article>`)}</div>
+      <div class="sheet-questions">${sheet.answers.map((answer, index) => html`<article class="sheet-question ${graded ? answer.is_correct ? 'is-correct' : 'is-wrong' : 'is-pending'}"><div class="sheet-q-head"><span>QUESTION ${String(index + 1).padStart(2, '0')}</span><span class=${graded ? answer.is_correct ? 'correct-text' : 'wrong-text' : 'pending-text'}>${graded ? answer.is_correct ? '✓ Correct' : answer.selected_option ? '× Incorrect' : 'Not answered' : 'Not graded'}</span></div><h4>${answer.question_text}</h4><div class="sheet-answers">${letters.map((letter) => html`<div class="sheet-option ${letter === answer.correct_option ? 'right-option' : ''} ${graded && letter === answer.selected_option && !answer.is_correct ? 'chosen-wrong' : ''}"><span>${letter}</span><span>${answer[optionKeys[letter]]}</span>${letter === answer.selected_option ? html`<small class="student-label">STUDENT</small>` : ''}${letter === answer.correct_option ? html`<small>CORRECT</small>` : ''}</div>`)}</div>${answer.explanation ? html`<p class="answer-explanation"><b>Explanation</b> ${answer.explanation}</p>` : ''}<div class="marks-row"><span>Student selected <b>${answer.selected_option ? `Option ${answer.selected_option}` : 'No answer'}</b></span><span>${graded ? `${answer.marks_awarded ?? 0} / ${answer.marks} mark${answer.marks === 1 ? '' : 's'}` : 'Pending submission'}</span></div></article>`)}</div>
       <button class="button button-outline button-full back-sheet-button" @click=${() => { this.answerSheet = null; this.requestUpdate(); }}>← Back to participants</button>
     </div>`;
   }
@@ -782,17 +934,60 @@ class McqApp extends LitElement {
     return html`<div class="modal-backdrop" @click=${(event) => { if (event.target === event.currentTarget) this.dismissStart(); }}><section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="start-title"><button class="icon-close modal-close" @click=${this.dismissStart}>×</button><span class="eyebrow muted">BEFORE YOU BEGIN</span><h2 id="start-title">${this.startingExam.title}</h2><p class="modal-intro">${this.startingExam.question_count} questions · ${this.startingExam.duration_minutes} minutes. Enter your details to begin.</p><div class="start-reminder"><span>◷</span><span>${this.startingExam.loadingDetails ? 'Loading the exam scoring rule…' : `Your timer starts as soon as you begin. A wrong answer loses ${Number(this.startingExam.negative_mark || 0)} mark; unanswered questions receive no penalty.`}</span></div><form class="stack-form" @submit=${this.startExam}><label>Full name<input name="student_name" required maxlength="120" autocomplete="name" placeholder="Your name" /></label><label>Email<input name="email" type="email" required maxlength="254" autocomplete="email" placeholder="you@example.com" /></label><label>Address<input name="address" required maxlength="500" autocomplete="street-address" placeholder="Your address" /></label><label>Roll number<input name="roll_number" required maxlength="60" placeholder="Your roll number" /></label><button class="button button-primary button-full" ?disabled=${this.busy || this.startingExam.loadingDetails}>${this.startingExam.loadingDetails ? 'Loading exam…' : this.busy ? 'Preparing your exam…' : 'Begin examination'} <span>→</span></button></form><button class="text-button modal-cancel" @click=${this.dismissStart}>Maybe later</button></section></div>`;
   }
 
+  renderSubmitConfirmDialog() {
+    const total = this.attempt?.questions?.length || 0;
+    const answered = Object.values(this.answers).filter(Boolean).length;
+    const unanswered = Math.max(0, total - answered);
+    return html`<div class="modal-backdrop" @click=${(event) => { if (event.target === event.currentTarget) { this.submitConfirmOpen = false; this.requestUpdate(); } }}>
+      <section class="modal-card confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-submit-title">
+        <button class="icon-close modal-close" @click=${() => { this.submitConfirmOpen = false; this.requestUpdate(); }}>×</button>
+        <span class="eyebrow muted">SUBMISSION CONFIRMATION</span>
+        <h2 id="confirm-submit-title">Submit your examination?</h2>
+        <p class="modal-intro">Review your answer progress before final scoring.</p>
+        <div class="confirm-summary-cards">
+          <div class="confirm-stat-card answered">
+            <span class="stat-badge">✓</span>
+            <div>
+              <strong>${answered} / ${total}</strong>
+              <small>Questions answered</small>
+            </div>
+          </div>
+          <div class="confirm-stat-card ${unanswered > 0 ? 'unanswered-warning' : 'unanswered-zero'}">
+            <span class="stat-badge">${unanswered > 0 ? '!' : '✓'}</span>
+            <div>
+              <strong>${unanswered}</strong>
+              <small>${unanswered === 1 ? 'Unanswered question' : 'Unanswered questions'}</small>
+            </div>
+          </div>
+        </div>
+        <div class="confirm-notice">
+          ${unanswered > 0 ? html`<span>⚠️</span><span>You still have <b>${unanswered} unanswered question${unanswered === 1 ? '' : 's'}</b>. Once submitted, answers cannot be modified.</span>` : html`<span>✦</span><span>You have answered all questions. Once submitted, your score will be calculated.</span>`}
+        </div>
+        <div class="confirm-actions">
+          <button type="button" class="button button-outline" @click=${() => { this.submitConfirmOpen = false; this.requestUpdate(); }}>
+            ← Keep reviewing
+          </button>
+          <button type="button" class="button button-primary" ?disabled=${this.busy} @click=${() => this.executeSubmitAttempt(false)}>
+            ${this.busy ? 'Submitting…' : 'Submit examination now →'}
+          </button>
+        </div>
+      </section>
+    </div>`;
+  }
+
   renderExam() {
     const question = this.attempt?.questions?.[this.currentQuestion];
     if (!question) return html`<main class="exam-loading"><div class="loader-dot"></div><p>Preparing your examination…</p></main>`;
     const answered = Object.values(this.answers).filter(Boolean).length;
     const total = this.attempt.questions.length;
     const progress = (answered / total) * 100;
+    const title = this.settings.site_title || 'Northstar';
+    const subtitle = this.settings.site_subtitle || 'EXAMINATION PORTAL';
     return html`<main class="exam-player">
-      <div class="exam-player-top"><button class="brand" @click=${() => { if (window.confirm('Leave this exam? You can return using this browser session.')) this.page = 'home'; }}><span class="brand-mark">N</span><span>northstar<span class="brand-dot">.</span><small>EXAMINATION PORTAL</small></span></button><div class="exam-live-meta"><span class="live-label"><span></span> IN PROGRESS</span><span class="timer-chip ${this.remainingSeconds < 300 ? 'timer-warning' : ''}"><span>◷</span>${htmlTime(this.remainingSeconds)}</span></div></div>
+      <div class="exam-player-top"><button class="brand" @click=${() => { if (window.confirm('Leave this exam? You can return using this browser session.')) this.page = 'home'; }}><span class="brand-mark">${title.charAt(0).toUpperCase()}</span><span>${title.toLowerCase()}<span class="brand-dot">.</span><small>${subtitle.toUpperCase()}</small></span></button><div class="exam-live-meta"><span class="live-label"><span></span> IN PROGRESS</span><span class="timer-chip ${this.remainingSeconds < 300 ? 'timer-warning' : ''}"><span>◷</span>${htmlTime(this.remainingSeconds)}</span></div></div>
       <div class="exam-player-layout"><aside class="exam-sidebar"><div class="sidebar-exam-info"><span class="eyebrow muted">EXAMINATION</span><h2>${this.attempt.exam_title}</h2><p>${this.attempt.student_name}<span> · Roll ${this.attempt.roll_number}</span></p></div><div class="sidebar-progress"><div><span>YOUR PROGRESS</span><b>${answered} <small>/ ${total}</small></b></div><div class="progress-track"><span style="width:${progress}%"></span></div><p>${answered === total ? 'You have answered every question.' : `${total - answered} questions remaining`}</p></div><div class="question-nav-label"><span>QUESTION NAVIGATOR</span><span>${answered} answered</span></div><div class="question-nav">${this.attempt.questions.map((item, index) => html`<button class="question-nav-item ${index === this.currentQuestion ? 'current' : ''} ${this.answers[item.id] ? 'answered' : ''}" @click=${() => { this.currentQuestion = index; this.requestUpdate(); }} aria-label=${`Question ${index + 1}${this.answers[item.id] ? ', answered' : ''}`}><span>${String(index + 1).padStart(2, '0')}</span>${this.answers[item.id] ? html`<span class="nav-check">✓</span>` : ''}</button>`)}</div><div class="nav-legend"><span><i class="legend-current"></i>Current</span><span><i class="legend-done"></i>Answered</span><span><i class="legend-empty"></i>Unanswered</span></div><div class="autosave-note"><span>✓</span> Answers save as you go</div></aside>
         <section class="question-stage"><div class="question-stage-top"><span>QUESTION <b>${String(this.currentQuestion + 1).padStart(2, '0')}</b> <i>OF</i> ${String(total).padStart(2, '0')}</span><span class="mark-chip">${question.marks} MARK</span></div><div class="question-progress"><span style="width:${((this.currentQuestion + 1) / total) * 100}%"></span></div><div class="question-content"><div class="question-step">${String(this.currentQuestion + 1).padStart(2, '0')} <span>—</span> ${String(total).padStart(2, '0')}</div><h1>${question.question_text}</h1><p class="question-hint">Select one answer to continue</p><div class="answer-options">${letters.map((letter) => html`<button class="answer-option ${this.answers[question.id] === letter ? 'selected' : ''}" @click=${() => this.selectAnswer(question, letter)}><span class="option-letter">${letter}</span><span class="option-text">${question[optionKeys[letter]]}</span><span class="option-radio">${this.answers[question.id] === letter ? html`<i></i>` : ''}</span></button>`)}</div></div><div class="question-actions"><button class="button button-outline" ?disabled=${this.currentQuestion === 0} @click=${() => { this.currentQuestion -= 1; this.requestUpdate(); }}>← <span>Previous</span></button><span class="save-state"><span class="save-dot"></span> ${this.pendingAnswerSaves ? 'Saving…' : 'Saved automatically'}</span>${this.currentQuestion < total - 1 ? html`<button class="button button-primary" @click=${() => { this.currentQuestion += 1; this.requestUpdate(); }}>Next question <span>→</span></button>` : html`<button class="button button-primary" @click=${() => this.submitAttempt(false)} ?disabled=${this.busy}>Submit exam <span>→</span></button>`}</div><button class="submit-text" @click=${() => this.submitAttempt(false)}>Submit examination</button></section>
-      </div><footer class="exam-player-footer"><span>Northstar Examination Portal</span><span>Need a moment? Your answers are saved automatically.</span></footer>
+      </div><footer class="exam-player-footer"><span>${title} Examination Portal</span><span>Need a moment? Your answers are saved automatically.</span></footer>
     </main>`;
   }
 
@@ -801,7 +996,7 @@ class McqApp extends LitElement {
     const reviewed = result.answers || [];
     return html`<main class="result-page"><div class="result-card"><div class="result-success-icon">✓</div><span class="eyebrow muted">EXAMINATION COMPLETE</span><h1>${this.attempt?.exam_title || 'Your examination'}</h1><p class="result-greeting">Well done, ${this.attempt?.student_name || 'student'}.</p><div class="result-message">Your exam has been submitted successfully.</div>
       ${Object.hasOwn(result, 'score') ? html`<div class="student-score"><span>YOUR SCORE</span><strong>${result.score}<small> / ${this.attempt.questions.length}</small></strong><p>${result.status === 'auto_submitted' ? 'Submitted automatically when time expired' : 'Your examination has been submitted'}</p></div>` : ''}
-      ${reviewed.length ? html`<div class="student-review"><div class="review-heading"><h2>Answer review</h2><span>${reviewed.filter((answer) => answer.is_correct).length} of ${reviewed.length} correct</span></div>${reviewed.map((answer, index) => html`<article class="review-item ${answer.is_correct ? 'is-correct' : 'is-wrong'}"><div class="review-item-head"><span>QUESTION ${String(index + 1).padStart(2, '0')}</span><b>${answer.is_correct ? '✓ Correct' : answer.selected_option ? '× Incorrect' : 'Not answered'}</b></div><h3>${answer.question_text}</h3><p>Your answer: <strong>${answer.selected_option ? `${answer.selected_option}. ${answer[optionKeys[answer.selected_option]]}` : 'Not answered'}</strong></p><p>Correct answer: <strong>${answer.correct_option}. ${answer[optionKeys[answer.correct_option]]}</strong></p>${answer.explanation ? html`<p class="answer-explanation"><b>Explanation</b> ${answer.explanation}</p>` : ''}<span class="review-mark">${answer.marks_awarded} / ${answer.marks} mark</span></article>`)}</div>` : ''}
+      ${reviewed.length ? html`<div class="student-review"><div class="review-heading"><h2>Answer review</h2><span>${reviewed.filter((answer) => answer.is_correct).length} of ${reviewed.length} correct</span></div>${reviewed.map((answer, index) => html`<article class="review-item ${answer.is_correct ? 'is-correct' : 'is-wrong'}"><div class="review-item-head"><span>QUESTION ${String(index + 1).padStart(2, '0')}</span><b>${answer.is_correct ? '✓ Correct' : answer.selected_option ? '× Incorrect' : 'Not answered'}</b></div><h3>${answer.question_text}</h3><p>Your answer: <strong>${answer.selected_option ? `${answer.selected_option}. ${answer[optionKeys[answer.selected_option]]}` : 'Not answered'}</strong></p><p>Correct answer: <strong>${answer.correct_option}. ${answer[optionKeys[answer.correct_option]]}</strong></p>${answer.explanation ? html`<p class="answer-explanation"><b>Explanation</b> ${answer.explanation}</p>` : ''}<span class="review-mark">${answer.marks_awarded ?? 0} / ${answer.marks} mark</span></article>`)}</div>` : ''}
       <button class="button button-primary button-full" @click=${this.newAttempt}>Return to examinations <span>→</span></button>
     </div></main>`;
   }

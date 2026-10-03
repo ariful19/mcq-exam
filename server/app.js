@@ -196,6 +196,37 @@ app.post('/api/admin/password', requireAdmin, async (req, res) => {
   });
 });
 
+app.get('/api/settings', (_req, res) => {
+  const rows = db.prepare('SELECT key, value FROM settings').all();
+  const settings = Object.fromEntries(rows.map((row) => [row.key, row.value]));
+  res.json(settings);
+});
+
+app.put('/api/admin/settings', requireAdmin, (req, res) => {
+  const allowedKeys = [
+    'site_title',
+    'site_subtitle',
+    'hero_eyebrow',
+    'hero_title',
+    'hero_description',
+    'hero_tagline',
+    'footer_copyright',
+    'footer_tagline',
+  ];
+  const updates = req.body || {};
+  const upsert = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
+  db.transaction(() => {
+    for (const key of allowedKeys) {
+      if (typeof updates[key] === 'string') {
+        upsert.run(key, updates[key].trim().slice(0, 1000));
+      }
+    }
+  })();
+  const rows = db.prepare('SELECT key, value FROM settings').all();
+  const settings = Object.fromEntries(rows.map((row) => [row.key, row.value]));
+  res.json(settings);
+});
+
 app.get('/api/exams', (_req, res) => {
   const exams = db.prepare(`SELECT e.id, e.title, e.description, e.duration_minutes, e.created_at,
       COUNT(eq.id) AS question_count
@@ -216,7 +247,7 @@ app.get('/api/exams/:id', (req, res) => {
 });
 
 app.get('/api/admin/backup', requireAdmin, (_req, res) => {
-  const tables = ['questions', 'exams', 'exam_questions', 'attempts', 'answers', 'admin_auth'];
+  const tables = ['questions', 'exams', 'exam_questions', 'attempts', 'answers', 'admin_auth', 'settings'];
   const data = db.transaction(() => Object.fromEntries(tables.map((table) => [table, db.prepare(`SELECT * FROM ${table}`).all()])))();
   res.set('Cache-Control', 'no-store');
   res.attachment(`mcq-backup-${new Date().toISOString().slice(0, 10)}.json`);
@@ -392,7 +423,7 @@ app.post('/api/admin/exams', requireAdmin, (req, res) => {
   const ids = Array.isArray(req.body?.question_ids) ? [...new Set(req.body.question_ids.map(Number).filter(Number.isSafeInteger))] : [];
   if (!title) return apiError(res, 400, 'Exam title is required.');
   if (!subject) return apiError(res, 400, 'Subject is required.');
-  if (![1, 0.25, 0.5].includes(negativeMark)) return apiError(res, 400, 'Choose a negative mark of 1, 0.25 or 0.50.');
+  if (![0, 1, 0.25, 0.5].includes(negativeMark)) return apiError(res, 400, 'Choose a negative mark of 0, 1, 0.25 or 0.50.');
   if (!Number.isInteger(duration) || duration < 1 || duration > 1440) return apiError(res, 400, 'Duration must be between 1 and 1440 minutes.');
   if (showAnswers && !showScore) return apiError(res, 400, 'Show score must be enabled to show answer review.');
   if (!ids.length) return apiError(res, 400, 'Select at least one question for this exam.');
