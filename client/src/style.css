@@ -699,3 +699,12 @@ button, a, input, select, textarea { -webkit-tap-highlight-color: transparent; }
 }
 
 .question-save-error { color: var(--red); font-size: 14px; line-height: 1.5; }
+
+.attempt-list-item { display: flex; align-items: center; gap: 8px; border-bottom: 1px solid #f1f1f5; }
+.attempt-list-item .attempt-row { flex: 1; min-width: 0; border-bottom: 0; }
+.attempt-list-item > .button { flex-shrink: 0; }
+@media (max-width: 600px) {
+  .attempt-list-item { flex-wrap: wrap; padding-bottom: 10px; }
+  .attempt-list-item .attempt-row { flex-basis: 100%; }
+  .attempt-list-item > .button { margin-left: 14px; }
+}

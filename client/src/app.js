@@ -470,12 +470,12 @@ class McqApp extends LitElement {
   }
 
   async deleteAttempt(attempt) {
-    if (!confirm(`Delete the answer sheet for ${attempt.student_name}? This cannot be undone.`)) return;
+    if (!confirm(`Delete the result sheet and all saved answers for ${attempt.student_name} (Roll ${attempt.roll_number})? This cannot be undone.`)) return;
     try {
       await api(`/api/admin/attempts/${attempt.id}`, { method: 'DELETE' });
       await this.loadAttempts(this.resultExam);
       await this.loadAdminData();
-      this.notify('Answer sheet deleted.');
+      this.notify('Result sheet deleted.');
     } catch (error) { this.notify(error.message, 'error'); }
   }
 
@@ -911,14 +911,14 @@ class McqApp extends LitElement {
           ${this.attempts.length ? html`<button class="button button-outline button-small" @click=${() => this.exportAttemptsCsv(exam)}>↓ Export CSV</button>` : ''}
         </div>
       </div>
-      ${this.attempts.length ? html`<div class="attempt-list">${this.attempts.map((attempt) => html`<button class="attempt-row" @click=${() => this.openAnswerSheet(attempt)}><span class="attempt-avatar">${attempt.student_name.slice(0, 1).toUpperCase()}</span><span class="attempt-person"><b>${attempt.student_name}</b><small>Roll ${attempt.roll_number}${attempt.email ? ` · ${attempt.email}` : ''}</small></span><span class="attempt-score">${attempt.score === null ? '—' : `${attempt.score} / ${exam.question_count}`}</span><span class="status-tag ${attempt.status}">${attempt.status.replace('_', ' ')}</span><span class="row-arrow">→</span></button>`)}</div>` : html`<div class="empty-inline">No participants yet. Share the published exam link with students.</div>`}
+      ${this.attempts.length ? html`<div class="attempt-list">${this.attempts.map((attempt) => html`<div class="attempt-list-item"><button class="attempt-row" @click=${() => this.openAnswerSheet(attempt)}><span class="attempt-avatar">${attempt.student_name.slice(0, 1).toUpperCase()}</span><span class="attempt-person"><b>${attempt.student_name}</b><small>Roll ${attempt.roll_number}${attempt.email ? ` · ${attempt.email}` : ''}</small></span><span class="attempt-score">${attempt.score === null ? '—' : `${attempt.score} / ${exam.question_count}`}</span><span class="status-tag ${attempt.status}">${attempt.status.replace('_', ' ')}</span><span class="row-arrow">→</span></button><button class="button button-danger button-small" aria-label=${`Delete result sheet for ${attempt.student_name}, roll ${attempt.roll_number}`} @click=${() => this.deleteAttempt(attempt)}>Delete result sheet</button></div>`)}</div>` : html`<div class="empty-inline">No participants yet. Share the published exam link with students.</div>`}
     </div>`;
   }
 
   renderAnswerSheet() {
     const sheet = this.answerSheet;
     const graded = sheet.status !== 'in_progress';
-    return html`<div class="answer-sheet"><div class="sheet-header"><div><button class="back-link compact-back" @click=${() => { this.answerSheet = null; this.requestUpdate(); }}>← Participants</button><h3>${sheet.student_name}<span> · Roll ${sheet.roll_number}</span></h3><p>${sheet.exam_title} · ${sheet.email || 'No email provided'} · ${sheet.address || 'No address provided'}</p></div><div class="sheet-score"><b>${sheet.score}</b><small>FINAL SCORE</small></div></div><button class="button button-danger button-small" @click=${() => this.deleteAttempt(sheet)}>Delete answer sheet</button><div class="sheet-meta"><span class="status-tag ${sheet.status}">${sheet.status.replace('_', ' ')}</span><span>Penalty: −${Number(this.resultExam?.negative_mark || 0)} for wrong answers</span><span>Started ${this.formatDate(sheet.started_at)}</span><span>${sheet.submitted_at ? `Submitted ${this.formatDate(sheet.submitted_at)}` : 'Not submitted'}</span></div>
+    return html`<div class="answer-sheet"><div class="sheet-header"><div><button class="back-link compact-back" @click=${() => { this.answerSheet = null; this.requestUpdate(); }}>← Participants</button><h3>${sheet.student_name}<span> · Roll ${sheet.roll_number}</span></h3><p>${sheet.exam_title} · ${sheet.email || 'No email provided'} · ${sheet.address || 'No address provided'}</p></div><div class="sheet-score"><b>${sheet.score}</b><small>FINAL SCORE</small></div></div><button class="button button-danger button-small" @click=${() => this.deleteAttempt(sheet)}>Delete result sheet</button><div class="sheet-meta"><span class="status-tag ${sheet.status}">${sheet.status.replace('_', ' ')}</span><span>Penalty: −${Number(this.resultExam?.negative_mark || 0)} for wrong answers</span><span>Started ${this.formatDate(sheet.started_at)}</span><span>${sheet.submitted_at ? `Submitted ${this.formatDate(sheet.submitted_at)}` : 'Not submitted'}</span></div>
       <div class="sheet-questions">${sheet.answers.map((answer, index) => html`<article class="sheet-question ${graded ? answer.is_correct ? 'is-correct' : 'is-wrong' : 'is-pending'}"><div class="sheet-q-head"><span>QUESTION ${String(index + 1).padStart(2, '0')}</span><span class=${graded ? answer.is_correct ? 'correct-text' : 'wrong-text' : 'pending-text'}>${graded ? answer.is_correct ? '✓ Correct' : answer.selected_option ? '× Incorrect' : 'Not answered' : 'Not graded'}</span></div><h4>${answer.question_text}</h4><div class="sheet-answers">${letters.map((letter) => html`<div class="sheet-option ${letter === answer.correct_option ? 'right-option' : ''} ${graded && letter === answer.selected_option && !answer.is_correct ? 'chosen-wrong' : ''}"><span>${letter}</span><span>${answer[optionKeys[letter]]}</span>${letter === answer.selected_option ? html`<small class="student-label">STUDENT</small>` : ''}${letter === answer.correct_option ? html`<small>CORRECT</small>` : ''}</div>`)}</div>${answer.explanation ? html`<p class="answer-explanation"><b>Explanation</b> ${answer.explanation}</p>` : ''}<div class="marks-row"><span>Student selected <b>${answer.selected_option ? `Option ${answer.selected_option}` : 'No answer'}</b></span><span>${graded ? `${answer.marks_awarded ?? 0} / ${answer.marks} mark${answer.marks === 1 ? '' : 's'}` : 'Pending submission'}</span></div></article>`)}</div>
       <button class="button button-outline button-full back-sheet-button" @click=${() => { this.answerSheet = null; this.requestUpdate(); }}>← Back to participants</button>
     </div>`;

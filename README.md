@@ -82,7 +82,7 @@ Admin APIs use a server-side session cookie. Student attempts use a random opaqu
 
 ## Admin deletion and backups
 
-Admins can delete an examination together with all its attempts and answers, or delete an individual answer sheet from its detail view. Both actions require confirmation and are permanent.
+Admins can delete an examination together with all its attempts and answers, or delete any individual result sheet directly from the participant list or its detail view, including submitted and automatically submitted sheets. Both actions require confirmation and are permanent.
 
 Questions can be edited or removed from the bank even after use. Editing a used question creates a new bank version; existing exams and answer sheets retain the original question, answer key, and score. Removing a question from the bank also preserves its use in existing exams.
 
