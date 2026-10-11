@@ -1,6 +1,7 @@
 import { LitElement, html } from 'lit';
 import { keyed } from 'lit/directives/keyed.js';
 import './style.css';
+import { installMotion, appear, disappear, slideQuestion } from './motion.js';
 
 const letters = ['A', 'B', 'C', 'D'];
 const optionKeys = { A: 'option_a', B: 'option_b', C: 'option_c', D: 'option_d' };
@@ -89,12 +90,16 @@ class McqApp extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
+    this.stopMotion = installMotion(this);
     this.initialize();
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
     clearInterval(this.timer);
+    clearTimeout(this.toastTimer);
+    this.stopMotion?.();
+    this.messageResolve?.(false);
     this.restoreQuestionScroll();
   }
 
@@ -105,6 +110,7 @@ class McqApp extends LitElement {
       this.questionScrollOverflow = document.body.style.overflow;
       document.body.style.overflow = 'hidden';
       dialog.showModal();
+      appear(dialog);
     } else if (!shouldOpen) {
       if (dialog?.open) dialog.close();
       this.restoreQuestionScroll();
@@ -118,8 +124,11 @@ class McqApp extends LitElement {
     }
   }
 
-  closeQuestionForm() {
-    if (this.busy) return;
+  async closeQuestionForm() {
+    if (this.busy || this.closingQuestion) return;
+    this.closingQuestion = true;
+    await disappear(this.querySelector(".question-dialog"));
+    this.closingQuestion = false;
     this.questionFormOpen = false;
     this.requestUpdate();
   }
@@ -168,7 +177,11 @@ class McqApp extends LitElement {
     this.toast = { message, kind, details };
     this.requestUpdate();
     clearTimeout(this.toastTimer);
-    this.toastTimer = setTimeout(() => { this.toast = null; this.requestUpdate(); }, 3600);
+    const toast = this.toast;
+    this.toastTimer = setTimeout(async () => {
+      await disappear(this.querySelector('.toast'));
+      if (this.toast === toast) { this.toast = null; this.requestUpdate(); }
+    }, 3600);
   }
 
   async enterAdmin() {
@@ -199,6 +212,7 @@ class McqApp extends LitElement {
     const data = new FormData(event.currentTarget);
     this.busy = true;
     this.adminLoginError = '';
+    this.requestUpdate();
     try {
       await api('/api/admin/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: data.get('username'), password: data.get('password') }) });
       this.adminLoggedIn = true;
@@ -267,6 +281,7 @@ class McqApp extends LitElement {
       await api(this.editingQuestion ? `/api/admin/questions/${this.editingQuestion.id}` : '/api/admin/questions', {
         method: this.editingQuestion ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
       });
+      await disappear(this.querySelector(".question-dialog"));
       this.questionFormOpen = false;
       await this.loadAdminData();
       this.notify(this.editingQuestion ? 'Question updated.' : 'Question added to the bank.');
@@ -277,7 +292,7 @@ class McqApp extends LitElement {
   }
 
   async deleteQuestion(question) {
-    if (!window.confirm('Delete this question from the bank?')) return;
+    if (!await this.confirmMessage('Delete this question from the bank?')) return;
     try {
       await api(`/api/admin/questions/${question.id}`, { method: 'DELETE' });
       await this.loadAdminData();
@@ -381,7 +396,7 @@ class McqApp extends LitElement {
       await navigator.clipboard.writeText(url);
       this.notify('Public exam link copied.');
     } catch {
-      window.prompt('Copy this public exam link:', url);
+      await this.confirmMessage('Copy this public exam link:', { value: url, info: true });
     }
   }
 
@@ -459,7 +474,7 @@ class McqApp extends LitElement {
   }
 
   async deleteExam(exam) {
-    if (!confirm(`Delete "${exam.title}" and all its answer sheets? This cannot be undone.`)) return;
+    if (!await this.confirmMessage(`Delete "${exam.title}" and all its answer sheets? This cannot be undone.`)) return;
     try {
       await api(`/api/admin/exams/${exam.id}`, { method: 'DELETE' });
       if (this.resultExam?.id === exam.id) { this.resultExam = null; this.answerSheet = null; this.attempts = []; }
@@ -470,7 +485,7 @@ class McqApp extends LitElement {
   }
 
   async deleteAttempt(attempt) {
-    if (!confirm(`Delete the result sheet and all saved answers for ${attempt.student_name} (Roll ${attempt.roll_number})? This cannot be undone.`)) return;
+    if (!await this.confirmMessage(`Delete the result sheet and all saved answers for ${attempt.student_name} (Roll ${attempt.roll_number})? This cannot be undone.`)) return;
     try {
       await api(`/api/admin/attempts/${attempt.id}`, { method: 'DELETE' });
       await this.loadAttempts(this.resultExam);
@@ -621,8 +636,10 @@ class McqApp extends LitElement {
   }
 
   async executeSubmitAttempt(auto = false) {
-    this.submitConfirmOpen = false;
+    if (this.busy || this.attempt?.status !== 'in_progress') return;
     this.busy = true;
+    if (this.submitConfirmOpen) await disappear(this.querySelector('.confirm-modal'));
+    this.submitConfirmOpen = false;
     this.requestUpdate();
     try {
       await this.answerSaveQueue.catch(() => {});
@@ -654,7 +671,64 @@ class McqApp extends LitElement {
     this.loadPublicExams();
   }
 
-  dismissStart() { this.startingExam = null; this.requestUpdate(); }
+  async dismissStart() {
+    await disappear(this.querySelector('.modal-card'));
+    this.startingExam = null; this.requestUpdate();
+  }
+
+  async closeSubmitConfirm() {
+    await disappear(this.querySelector('.confirm-modal'));
+    this.submitConfirmOpen = false; this.requestUpdate();
+  }
+
+  async goToQuestion(index) {
+    if (this.questionMoving || index === this.currentQuestion || index < 0 || index >= this.attempt.questions.length) return;
+    this.questionMoving = true;
+    try {
+      await slideQuestion(this.querySelector('.question-content'), Math.sign(index - this.currentQuestion), async () => {
+        if (this.page !== 'exam') return;
+        this.currentQuestion = index; this.requestUpdate(); await this.updateComplete;
+      });
+    } finally { this.questionMoving = false; }
+  }
+
+  async confirmMessage(message, options = {}) {
+    if (this.messageResolve) return false;
+    this.messageFocus = document.activeElement;
+    this.customMessage = { message, ...options };
+    const result = new Promise(resolve => { this.messageResolve = resolve; });
+    this.requestUpdate(); await this.updateComplete;
+    const dialog = this.querySelector('.message-dialog');
+    dialog.showModal(); appear(dialog);
+    dialog.querySelector('button')?.focus();
+    return result;
+  }
+
+  async resolveMessage(value) {
+    if (this.messageClosing) return;
+    this.messageClosing = true;
+    await disappear(this.querySelector('.message-dialog'));
+    this.querySelector('.message-dialog')?.close();
+    this.customMessage = null;
+    const resolve = this.messageResolve; this.messageResolve = null;
+    this.messageClosing = false;
+    this.requestUpdate(); this.messageFocus?.focus(); resolve?.(value);
+  }
+
+  renderCustomMessage() {
+    if (!this.customMessage) return '';
+    const message = this.customMessage;
+    return html`<dialog class="message-dialog" aria-labelledby="message-title" @cancel=${event => { event.preventDefault(); this.resolveMessage(false); }}>
+      <div class="message-icon">${message.info ? '↗' : '?'}</div>
+      <h2 id="message-title">${message.info ? 'Public examination link' : 'Please confirm'}</h2>
+      <p>${message.message}</p>
+      ${message.value ? html`<input aria-label="Public exam link" readonly .value=${message.value} @focus=${event => event.target.select()} />` : ''}
+      <div class="confirm-actions">
+        ${!message.info ? html`<button class="button button-outline" @click=${() => this.resolveMessage(false)}>Cancel</button>` : ''}
+        <button class="button ${message.info ? 'button-primary' : 'button-danger'}" @click=${() => this.resolveMessage(true)}>${message.info ? 'Done' : message.label || 'Delete'}</button>
+      </div>
+    </dialog>`;
+  }
 
   render() {
     return html`
@@ -676,9 +750,10 @@ class McqApp extends LitElement {
           }}>
           ${this.questionFormOpen ? this.renderQuestionForm() : ''}
         </dialog>
+        ${this.renderCustomMessage()}
         ${this.startingExam ? this.renderStartDialog() : ''}
         ${this.submitConfirmOpen ? this.renderSubmitConfirmDialog() : ''}
-        ${this.toast ? html`<div class="toast ${this.toast.kind}" role="status"><b>${this.toast.message}</b>${this.toast.details?.length ? html`<ul>${this.toast.details.map((detail) => html`<li>${detail}</li>`)}</ul>` : ''}</div>` : ''}
+        ${this.toast ? keyed(this.toast, html`<div class="toast ${this.toast.kind}" role="status"><b>${this.toast.message}</b>${this.toast.details?.length ? html`<ul>${this.toast.details.map((detail) => html`<li>${detail}</li>`)}</ul>` : ''}</div>`) : ''}
       </div>
     `;
   }
@@ -938,9 +1013,9 @@ class McqApp extends LitElement {
     const total = this.attempt?.questions?.length || 0;
     const answered = Object.values(this.answers).filter(Boolean).length;
     const unanswered = Math.max(0, total - answered);
-    return html`<div class="modal-backdrop" @click=${(event) => { if (event.target === event.currentTarget) { this.submitConfirmOpen = false; this.requestUpdate(); } }}>
+    return html`<div class="modal-backdrop" @click=${(event) => { if (event.target === event.currentTarget) { this.closeSubmitConfirm(); } }}>
       <section class="modal-card confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-submit-title">
-        <button class="icon-close modal-close" @click=${() => { this.submitConfirmOpen = false; this.requestUpdate(); }}>×</button>
+        <button class="icon-close modal-close" @click=${() => { this.closeSubmitConfirm(); }}>×</button>
         <span class="eyebrow muted">SUBMISSION CONFIRMATION</span>
         <h2 id="confirm-submit-title">Submit your examination?</h2>
         <p class="modal-intro">Review your answer progress before final scoring.</p>
@@ -964,7 +1039,7 @@ class McqApp extends LitElement {
           ${unanswered > 0 ? html`<span>⚠️</span><span>You still have <b>${unanswered} unanswered question${unanswered === 1 ? '' : 's'}</b>. Once submitted, answers cannot be modified.</span>` : html`<span>✦</span><span>You have answered all questions. Once submitted, your score will be calculated.</span>`}
         </div>
         <div class="confirm-actions">
-          <button type="button" class="button button-outline" @click=${() => { this.submitConfirmOpen = false; this.requestUpdate(); }}>
+          <button type="button" class="button button-outline" @click=${() => { this.closeSubmitConfirm(); }}>
             ← Keep reviewing
           </button>
           <button type="button" class="button button-primary" ?disabled=${this.busy} @click=${() => this.executeSubmitAttempt(false)}>
@@ -984,9 +1059,9 @@ class McqApp extends LitElement {
     const title = this.settings.site_title || 'Northstar';
     const subtitle = this.settings.site_subtitle || 'EXAMINATION PORTAL';
     return html`<main class="exam-player">
-      <div class="exam-player-top"><button class="brand" @click=${() => { if (window.confirm('Leave this exam? You can return using this browser session.')) this.page = 'home'; }}><span class="brand-mark">${title.charAt(0).toUpperCase()}</span><span>${title.toLowerCase()}<span class="brand-dot">.</span><small>${subtitle.toUpperCase()}</small></span></button><div class="exam-live-meta"><span class="live-label"><span></span> IN PROGRESS</span><span class="timer-chip ${this.remainingSeconds < 300 ? 'timer-warning' : ''}"><span>◷</span>${htmlTime(this.remainingSeconds)}</span></div></div>
-      <div class="exam-player-layout"><aside class="exam-sidebar"><div class="sidebar-exam-info"><span class="eyebrow muted">EXAMINATION</span><h2>${this.attempt.exam_title}</h2><p>${this.attempt.student_name}<span> · Roll ${this.attempt.roll_number}</span></p></div><div class="sidebar-progress"><div><span>YOUR PROGRESS</span><b>${answered} <small>/ ${total}</small></b></div><div class="progress-track"><span style="width:${progress}%"></span></div><p>${answered === total ? 'You have answered every question.' : `${total - answered} questions remaining`}</p></div><div class="question-nav-label"><span>QUESTION NAVIGATOR</span><span>${answered} answered</span></div><div class="question-nav">${this.attempt.questions.map((item, index) => html`<button class="question-nav-item ${index === this.currentQuestion ? 'current' : ''} ${this.answers[item.id] ? 'answered' : ''}" @click=${() => { this.currentQuestion = index; this.requestUpdate(); }} aria-label=${`Question ${index + 1}${this.answers[item.id] ? ', answered' : ''}`}><span>${String(index + 1).padStart(2, '0')}</span>${this.answers[item.id] ? html`<span class="nav-check">✓</span>` : ''}</button>`)}</div><div class="nav-legend"><span><i class="legend-current"></i>Current</span><span><i class="legend-done"></i>Answered</span><span><i class="legend-empty"></i>Unanswered</span></div><div class="autosave-note"><span>✓</span> Answers save as you go</div></aside>
-        <section class="question-stage"><div class="question-stage-top"><span>QUESTION <b>${String(this.currentQuestion + 1).padStart(2, '0')}</b> <i>OF</i> ${String(total).padStart(2, '0')}</span><span class="mark-chip">${question.marks} MARK</span></div><div class="question-progress"><span style="width:${((this.currentQuestion + 1) / total) * 100}%"></span></div><div class="question-content"><div class="question-step">${String(this.currentQuestion + 1).padStart(2, '0')} <span>—</span> ${String(total).padStart(2, '0')}</div><h1>${question.question_text}</h1><p class="question-hint">Select one answer to continue</p><div class="answer-options">${letters.map((letter) => html`<button class="answer-option ${this.answers[question.id] === letter ? 'selected' : ''}" @click=${() => this.selectAnswer(question, letter)}><span class="option-letter">${letter}</span><span class="option-text">${question[optionKeys[letter]]}</span><span class="option-radio">${this.answers[question.id] === letter ? html`<i></i>` : ''}</span></button>`)}</div></div><div class="question-actions"><button class="button button-outline" ?disabled=${this.currentQuestion === 0} @click=${() => { this.currentQuestion -= 1; this.requestUpdate(); }}>← <span>Previous</span></button><span class="save-state"><span class="save-dot"></span> ${this.pendingAnswerSaves ? 'Saving…' : 'Saved automatically'}</span>${this.currentQuestion < total - 1 ? html`<button class="button button-primary" @click=${() => { this.currentQuestion += 1; this.requestUpdate(); }}>Next question <span>→</span></button>` : html`<button class="button button-primary" @click=${() => this.submitAttempt(false)} ?disabled=${this.busy}>Submit exam <span>→</span></button>`}</div><button class="submit-text" @click=${() => this.submitAttempt(false)}>Submit examination</button></section>
+      <div class="exam-player-top"><button class="brand" @click=${async () => { if (await this.confirmMessage('Leave this exam? You can return using this browser session.', { label: 'Leave exam' })) { this.page = 'home'; this.requestUpdate(); } }}><span class="brand-mark">${title.charAt(0).toUpperCase()}</span><span>${title.toLowerCase()}<span class="brand-dot">.</span><small>${subtitle.toUpperCase()}</small></span></button><div class="exam-live-meta"><span class="live-label"><span></span> IN PROGRESS</span><span class="timer-chip ${this.remainingSeconds < 300 ? 'timer-warning' : ''}"><span>◷</span>${htmlTime(this.remainingSeconds)}</span></div></div>
+      <div class="exam-player-layout"><aside class="exam-sidebar"><div class="sidebar-exam-info"><span class="eyebrow muted">EXAMINATION</span><h2>${this.attempt.exam_title}</h2><p>${this.attempt.student_name}<span> · Roll ${this.attempt.roll_number}</span></p></div><div class="sidebar-progress"><div><span>YOUR PROGRESS</span><b>${answered} <small>/ ${total}</small></b></div><div class="progress-track"><span style="width:${progress}%"></span></div><p>${answered === total ? 'You have answered every question.' : `${total - answered} questions remaining`}</p></div><div class="question-nav-label"><span>QUESTION NAVIGATOR</span><span>${answered} answered</span></div><div class="question-nav">${this.attempt.questions.map((item, index) => html`<button class="question-nav-item ${index === this.currentQuestion ? 'current' : ''} ${this.answers[item.id] ? 'answered' : ''}" @click=${() => { this.goToQuestion(index); }} aria-label=${`Question ${index + 1}${this.answers[item.id] ? ', answered' : ''}`}><span>${String(index + 1).padStart(2, '0')}</span>${this.answers[item.id] ? html`<span class="nav-check">✓</span>` : ''}</button>`)}</div><div class="nav-legend"><span><i class="legend-current"></i>Current</span><span><i class="legend-done"></i>Answered</span><span><i class="legend-empty"></i>Unanswered</span></div><div class="autosave-note"><span>✓</span> Answers save as you go</div></aside>
+        <section class="question-stage"><div class="question-stage-top"><span>QUESTION <b>${String(this.currentQuestion + 1).padStart(2, '0')}</b> <i>OF</i> ${String(total).padStart(2, '0')}</span><span class="mark-chip">${question.marks} MARK</span></div><div class="question-progress"><span style="width:${((this.currentQuestion + 1) / total) * 100}%"></span></div><div class="question-content"><div class="question-step">${String(this.currentQuestion + 1).padStart(2, '0')} <span>—</span> ${String(total).padStart(2, '0')}</div><h1>${question.question_text}</h1><p class="question-hint">Select one answer to continue</p><div class="answer-options">${letters.map((letter) => html`<button class="answer-option ${this.answers[question.id] === letter ? 'selected' : ''}" @click=${() => this.selectAnswer(question, letter)}><span class="option-letter">${letter}</span><span class="option-text">${question[optionKeys[letter]]}</span><span class="option-radio">${this.answers[question.id] === letter ? html`<i></i>` : ''}</span></button>`)}</div></div><div class="question-actions"><button class="button button-outline" ?disabled=${this.currentQuestion === 0} @click=${() => { this.goToQuestion(this.currentQuestion - 1); }}>← <span>Previous</span></button><span class="save-state"><span class="save-dot"></span> ${this.pendingAnswerSaves ? 'Saving…' : 'Saved automatically'}</span>${this.currentQuestion < total - 1 ? html`<button class="button button-primary" @click=${() => { this.goToQuestion(this.currentQuestion + 1); }}>Next question <span>→</span></button>` : html`<button class="button button-primary" @click=${() => this.submitAttempt(false)} ?disabled=${this.busy}>Submit exam <span>→</span></button>`}</div><button class="submit-text" @click=${() => this.submitAttempt(false)}>Submit examination</button></section>
       </div><footer class="exam-player-footer"><span>${title} Examination Portal</span><span>Need a moment? Your answers are saved automatically.</span></footer>
     </main>`;
   }

@@ -700,6 +700,37 @@ button, a, input, select, textarea { -webkit-tap-highlight-color: transparent; }
 
 .question-save-error { color: var(--red); font-size: 14px; line-height: 1.5; }
 
+/* Translucent surfaces pick up the soft aurora behind the portal. */
+body {
+  background: radial-gradient(ellipse at 8% 8%, #d9d3ff88, transparent 48%), radial-gradient(ellipse at 95% 55%, #c7e8f577, transparent 50%), #f5f6fa;
+  background-attachment: fixed;
+}
+.site-header, .login-card, .exam-card, .stat-card, .admin-panel,
+.modal-card, .result-card, .direct-exam-card, .exam-sidebar, .question-stage,
+.question-dialog, .message-dialog, .toast {
+  background: linear-gradient(135deg, #ffffffd9, #f7f7ffb8);
+  border: 1px solid #ffffffd9;
+  backdrop-filter: blur(24px) saturate(150%);
+  -webkit-backdrop-filter: blur(24px) saturate(150%);
+  box-shadow: inset 0 1px 0 #fff, inset 0 -1px 0 #ffffff70, 0 12px 40px #453e7710;
+}
+.welcome-panel { background: linear-gradient(115deg, #e7e2ffb8, #f7f5ffb8, #dceef6a8); border: 1px solid #ffffffd9; backdrop-filter: blur(20px); }
+.question-dialog .question-editor { background: transparent; }
+.question-dialog::backdrop, .message-dialog::backdrop { background: #22243b66; backdrop-filter: blur(9px); }
+.modal-backdrop { backdrop-filter: blur(9px); }
+.question-stage { overflow: hidden; }
+.question-content { transform-style: preserve-3d; }
+.login-card { position: relative; padding-top: 54px; }
+.login-card::before { content: ''; position: absolute; left: 24px; top: 22px; width: 10px; height: 10px; border-radius: 50%; background: #ff7771; box-shadow: 17px 0 #f6c95b, 34px 0 #65c98a; }
+.message-dialog { width: min(440px, calc(100% - 32px)); padding: 30px; border-radius: 24px; color: var(--ink); }
+.message-dialog h2 { font-size: 22px; letter-spacing: -.5px; }
+.message-dialog p { color: #526079; line-height: 1.7; overflow-wrap: anywhere; }
+.message-dialog .confirm-actions { margin-top: 24px; }
+.message-icon { display: grid; place-items: center; width: 46px; height: 46px; border-radius: 15px; color: #7166d6; background: #e9e5ff; font-size: 24px; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
+}
+
 .attempt-list-item { display: flex; align-items: center; gap: 8px; border-bottom: 1px solid #f1f1f5; }
 .attempt-list-item .attempt-row { flex: 1; min-width: 0; border-bottom: 0; }
 .attempt-list-item > .button { flex-shrink: 0; }
