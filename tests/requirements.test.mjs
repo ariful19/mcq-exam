@@ -165,8 +165,23 @@ test('MCQ requirements work through the local API and persist in SQLite', { time
       show_answers: false,
       question_ids: [manualId, pasteId, excel.id],
     };
-    response = await admin('/api/admin/exams', { method: 'POST', body: { ...examBody, question_ids: [manualId, otherId] } });
-    assert.equal(response.status, 400, 'Exam must reject questions from another subject.');
+    // Verify multi-subject exam creation succeeds
+    const multiSubjectExam = await admin('/api/admin/exams', {
+      method: 'POST',
+      body: {
+        title: 'Multi-subject exam',
+        duration_minutes: 15,
+        status: 'published',
+        negative_mark: 0.25,
+        show_score: true,
+        show_answers: true,
+        question_ids: [manualId, otherId],
+      },
+    });
+    assert.equal(multiSubjectExam.status, 201, 'Exam must accept questions from multiple subjects.');
+    assert.equal(multiSubjectExam.data.question_count, 2);
+    assert.ok(multiSubjectExam.data.subject.includes('Integration QA') && multiSubjectExam.data.subject.includes('Other Subject'));
+
     response = await admin('/api/admin/exams', { method: 'POST', body: examBody });
     assert.equal(response.status, 201, JSON.stringify(response.data));
     const examId = response.data.id;

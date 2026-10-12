@@ -414,7 +414,7 @@ app.get('/api/admin/exams', requireAdmin, (_req, res) => {
 app.post('/api/admin/exams', requireAdmin, (req, res) => {
   const title = String(req.body?.title || '').trim();
   const description = String(req.body?.description || '').trim();
-  const subject = String(req.body?.subject ?? '').trim();
+  const subjectInput = String(req.body?.subject ?? '').trim();
   const negativeMark = Number(req.body?.negative_mark);
   const duration = Number(req.body?.duration_minutes);
   const status = ['draft', 'published', 'closed'].includes(req.body?.status) ? req.body.status : 'draft';
@@ -422,16 +422,15 @@ app.post('/api/admin/exams', requireAdmin, (req, res) => {
   const showAnswers = req.body?.show_answers ? 1 : 0;
   const ids = Array.isArray(req.body?.question_ids) ? [...new Set(req.body.question_ids.map(Number).filter(Number.isSafeInteger))] : [];
   if (!title) return apiError(res, 400, 'Exam title is required.');
-  if (!subject) return apiError(res, 400, 'Subject is required.');
   if (![0, 1, 0.25, 0.5].includes(negativeMark)) return apiError(res, 400, 'Choose a negative mark of 0, 1, 0.25 or 0.50.');
   if (!Number.isInteger(duration) || duration < 1 || duration > 1440) return apiError(res, 400, 'Duration must be between 1 and 1440 minutes.');
   if (showAnswers && !showScore) return apiError(res, 400, 'Show score must be enabled to show answer review.');
   if (!ids.length) return apiError(res, 400, 'Select at least one question for this exam.');
   const available = db.prepare(`SELECT id, category FROM questions WHERE archived=0 AND id IN (${ids.map(() => '?').join(',')})`).all(...ids);
   if (available.length !== ids.length) return apiError(res, 400, 'One or more selected questions are no longer available. Refresh the question bank and try again.');
-  if (available.some((question) => question.category !== subject)) {
-    return apiError(res, 400, 'All selected questions must belong to the chosen subject.');
-  }
+  const distinctCategories = [...new Set(available.map((question) => question.category).filter(Boolean))];
+  const subject = subjectInput || distinctCategories.join(', ') || 'General';
+  if (!subject) return apiError(res, 400, 'Subject is required.');
   const examId = db.transaction(() => {
     const created = db.prepare(`INSERT INTO exams (title, description, duration_minutes, status, show_score, show_answers, subject, negative_mark)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(title, description, duration, status, showScore, showAnswers, subject, negativeMark);

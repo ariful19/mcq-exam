@@ -414,20 +414,22 @@ app.post('/api/admin/exams', requireAdmin, async (c) => {
   const title = String(body.title || '').trim();
   const description = String(body.description || '').trim();
   const duration = Number(body.duration_minutes);
-  const subject = String(body.subject ?? '').trim();
+  const subjectInput = String(body.subject ?? '').trim();
   const negativeMark = Number(body.negative_mark);
   const status = ['draft','published','closed'].includes(body.status) ? body.status : 'draft';
   const showScore = body.show_score ? 1 : 0;
   const showAnswers = body.show_answers ? 1 : 0;
   const ids = Array.isArray(body.question_ids) ? [...new Set(body.question_ids.map(Number).filter(Number.isSafeInteger))] : [];
   if (!title) return apiError(c, 400, 'Exam title is required.');
-  if (!subject) return apiError(c, 400, 'Subject is required.');
   if (!allowedNegativeMarks.includes(negativeMark)) return apiError(c, 400, 'Choose a negative mark of 1, 0.25, or 0.50.');
   if (!Number.isInteger(duration) || duration < 1 || duration > 1440) return apiError(c, 400, 'Duration must be between 1 and 1440 minutes.');
   if (showAnswers && !showScore) return apiError(c, 400, 'Show score must be enabled to show answer review.');
   if (!ids.length) return apiError(c, 400, 'Select at least one question for this exam.');
-  const available = await c.env.DB.prepare(`SELECT id FROM questions WHERE archived=0 AND category=? AND id IN (${ids.map(() => '?').join(',')})`).bind(subject,...ids).all();
-  if ((available.results || []).length !== ids.length) return apiError(c, 400, 'Select only available questions from the chosen subject. Refresh the question bank and try again.');
+  const available = await c.env.DB.prepare(`SELECT id, category FROM questions WHERE archived=0 AND id IN (${ids.map(() => '?').join(',')})`).bind(...ids).all();
+  if ((available.results || []).length !== ids.length) return apiError(c, 400, 'One or more selected questions are no longer available. Refresh the question bank and try again.');
+  const distinctCategories = [...new Set((available.results || []).map((q) => q.category).filter(Boolean))];
+  const subject = subjectInput || distinctCategories.join(', ') || 'General';
+  if (!subject) return apiError(c, 400, 'Subject is required.');
   const created = await c.env.DB.prepare(`INSERT INTO exams (title,description,duration_minutes,subject,negative_mark,status,show_score,show_answers) VALUES (?,?,?,?,?,?,?,?)`)
     .bind(title,description,duration,subject,negativeMark,status,showScore,showAnswers).run();
   const examId = created.meta.last_row_id;

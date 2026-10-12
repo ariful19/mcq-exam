@@ -2,6 +2,7 @@ import { LitElement, html } from 'lit';
 import { keyed } from 'lit/directives/keyed.js';
 import './style.css';
 import { installMotion, appear, disappear, slideQuestion } from './motion.js';
+import { filterAndSortResults } from './results.js';
 
 const letters = ['A', 'B', 'C', 'D'];
 const optionKeys = { A: 'option_a', B: 'option_b', C: 'option_c', D: 'option_d' };
@@ -61,6 +62,8 @@ class McqApp extends LitElement {
     this.selectionSearch = '';
     this.resultExam = null;
     this.attempts = [];
+    this.resultSearch = '';
+    this.resultSort = 'recent';
     this.answerSheet = null;
     this.startingExam = null;
     this.toast = null;
@@ -251,7 +254,7 @@ class McqApp extends LitElement {
 
   get selectionQuestions() {
     const query = this.selectionSearch.trim().toLowerCase();
-    return this.questions.filter((question) => question.category === this.examSubject
+    return this.questions.filter((question) => (!this.examSubject || question.category === this.examSubject)
       && (!query || `${question.question_text} ${question.category}`.toLowerCase().includes(query)));
   }
 
@@ -346,7 +349,9 @@ class McqApp extends LitElement {
   }
 
   regenerateRandom() {
-    const available = this.questions.filter((q) => q.category === this.examSubject).map((q) => q.id);
+    const available = this.questions
+      .filter((q) => !this.examSubject || q.category === this.examSubject)
+      .map((q) => q.id);
     if (!available.length) {
       this.selectionIds = [];
       this.requestUpdate();
@@ -364,22 +369,27 @@ class McqApp extends LitElement {
 
   async createExam(event) {
     event.preventDefault();
-    const values = Object.fromEntries(new FormData(event.currentTarget));
-    if (!this.examSubject) { this.notify('Choose a subject before selecting exam questions.', 'error'); return; }
+    const form = event.currentTarget;
+    const values = Object.fromEntries(new FormData(form));
     if (this.selectionMode === 'random' && !this.selectionIds.length) this.regenerateRandom();
     const selected = this.selectionIds;
     if (!selected.length) { this.notify('Select at least one available question.', 'error'); return; }
+    const selectedQuestions = selected.map((id) => this.questions.find((q) => q.id === id)).filter(Boolean);
+    const selectedCategories = [...new Set(selectedQuestions.map((q) => q.category).filter(Boolean))];
+    const examSubject = String(values.subject || '').trim() || selectedCategories.join(', ') || 'General';
     const payload = {
       title: values.title, description: values.description, duration_minutes: Number(values.duration_minutes),
-      subject: this.examSubject, negative_mark: Number(values.negative_mark),
-      status: values.status, show_score: event.currentTarget.elements.show_score.checked,
-      show_answers: event.currentTarget.elements.show_answers.checked, question_ids: selected,
+      subject: examSubject, negative_mark: Number(values.negative_mark),
+      status: values.status, show_score: form.elements.show_score.checked,
+      show_answers: form.elements.show_answers.checked, question_ids: selected,
     };
     this.busy = true;
     try {
       const created = await api('/api/admin/exams', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       this.selectionIds = [];
       this.selectionSearch = '';
+      this.examSubject = '';
+      form.reset();
       await this.loadAdminData();
       if (created.status === 'published') this.notify(`Examination created. Share ${this.examUrl(created)} with students.`);
       else this.notify('Examination created as a draft. Publish it to enable its public link.');
@@ -495,6 +505,11 @@ class McqApp extends LitElement {
   }
 
   async loadAttempts(exam) {
+    if (this.resultExam?.id !== exam.id) {
+      this.resultSearch = '';
+      this.resultSort = 'recent';
+      this.attempts = [];
+    }
     this.resultExam = exam;
     this.answerSheet = null;
     try { this.attempts = await api(`/api/admin/exams/${exam.id}/attempts`); }
@@ -949,18 +964,22 @@ class McqApp extends LitElement {
 
   renderExamsAdmin() {
     const selectedQuestions = this.selectionIds.map((id) => this.questions.find((question) => question.id === id)).filter(Boolean);
-    const availableForSubject = this.questions.filter((question) => question.category === this.examSubject);
+    const selectedCategories = [...new Set(selectedQuestions.map((q) => q.category).filter(Boolean))];
+    const availableForSubject = this.examSubject
+      ? this.questions.filter((question) => question.category === this.examSubject)
+      : this.questions;
     return html`<section class="exam-admin-layout">
       <div class="admin-panel exam-create-panel"><div class="panel-heading"><div><h2>Create an examination</h2><p>Choose a fixed question set and set your result rules.</p></div><span class="create-spark">✦</span></div>
         <form class="stack-form create-exam-form" @submit=${this.createExam}>
           <div class="field-row"><label>Examination title<input name="title" required maxlength="160" placeholder="e.g. General Knowledge — October" /></label><label>Duration (minutes)<input name="duration_minutes" type="number" min="1" max="1440" value="30" required /></label></div>
+          <label>Exam subject <span class="optional-label">OPTIONAL · DEFAULTS TO SELECTED SUBJECTS</span><input name="subject" list="exam-subject-options" maxlength="80" placeholder="e.g. Combined Science (or leave blank to auto-detect)" /><datalist id="exam-subject-options">${this.questionCategories.map((value) => html`<option value=${value}></option>`)}</datalist></label>
           <label>Description <span class="optional-label">OPTIONAL</span><textarea name="description" rows="2" maxlength="500" placeholder="Give students a little context"></textarea></label>
           <fieldset class="selection-fieldset"><legend>Question selection</legend>
-            <label class="subject-select-label">Subject<select name="subject" required .value=${this.examSubject} @change=${(event) => { this.examSubject = event.target.value; this.selectionIds = []; this.selectionSearch = ''; this.randomCount = 10; this.requestUpdate(); }}><option value="">Choose a subject…</option>${this.questionCategories.map((value) => html`<option value=${value}>${value}</option>`)}</select></label>
-            <div class="selection-switch"><button type="button" class=${this.selectionMode === 'manual' ? 'selected' : ''} @click=${() => { this.selectionMode = 'manual'; this.selectionIds = []; this.requestUpdate(); }}>☷ &nbsp; Manual selection</button><button type="button" class=${this.selectionMode === 'random' ? 'selected' : ''} @click=${() => { this.selectionMode = 'random'; this.selectionIds = []; this.requestUpdate(); }}>⤨ &nbsp; Random selection</button></div>
-            ${this.selectionMode === 'manual' ? html`<div class="selection-tools"><span>${this.examSubject ? `${availableForSubject.length} questions in ${this.examSubject}` : 'Choose a subject to load its questions'}</span><label class="compact-search"><span>⌕</span><input placeholder="Find a question…" .value=${this.selectionSearch} ?disabled=${!this.examSubject} @input=${(event) => { this.selectionSearch = event.target.value; this.requestUpdate(); }} /></label></div><div class="selection-list">${this.selectionQuestions.map((question) => html`<label class="selection-item"><input type="checkbox" .checked=${this.selectionIds.includes(question.id)} @change=${(event) => this.toggleSelectedQuestion(question.id, event.target.checked)} /><span class="selection-item-content"><b>${question.question_text}</b><span class="selection-option-grid">${letters.map((letter) => html`<span class=${letter === question.correct_option ? 'selection-correct-option' : ''}><strong>${letter}.</strong> ${question[optionKeys[letter]]}${letter === question.correct_option ? html` <b class="correct-answer-label">✓ Correct answer</b>` : ''}</span>`)}</span>${question.explanation ? html`<small class="selection-explanation">Explanation: ${question.explanation}</small>` : ''}<small>${question.difficulty || 'Difficulty not set'}</small></span></label>`)}</div>` : html`<div class="random-maker"><label>Number of questions<input type="number" min="1" max=${Math.max(1, availableForSubject.length)} .value=${String(this.randomCount)} ?disabled=${!availableForSubject.length} @input=${(event) => { this.randomCount = event.target.value; this.requestUpdate(); }} /></label><button type="button" class="button button-outline" ?disabled=${!availableForSubject.length} @click=${this.regenerateRandom}>⟳ Regenerate selection</button><div class="random-preview"><span class="preview-icon">✧</span><div><b>${this.selectionIds.length ? `${this.selectionIds.length} questions selected` : 'Preview your random selection'}</b><small>${availableForSubject.length ? `Random picks use only ${this.examSubject} questions.` : 'Choose a subject with questions to continue.'}</small></div></div></div>`}
-          <div class="selection-footer"><span><b>${this.selectionIds.length}</b> question${this.selectionIds.length === 1 ? '' : 's'} selected</span><span>1 mark each · −${Number(this.querySelector('[name="negative_mark"]')?.value || 1)} for a wrong answer</span></div>
-            ${selectedQuestions.length ? html`<div class="selected-questions-preview" aria-label="Full selected question preview">${selectedQuestions.map((q, index) => html`<article class="selected-question-preview"><div class="selected-preview-heading"><span>${String(index + 1).padStart(2, '0')}</span><b>${q.question_text}</b></div><div class="selection-option-grid">${letters.map((letter) => html`<span class=${letter === q.correct_option ? 'selection-correct-option' : ''}><strong>${letter}.</strong> ${q[optionKeys[letter]]}${letter === q.correct_option ? html` <b class="correct-answer-label">✓ Correct answer</b>` : ''}</span>`)}</div>${q.explanation ? html`<small class="selection-explanation">Explanation: ${q.explanation}</small>` : ''}</article>`)}</div>` : ''}
+            <label class="subject-select-label">Filter questions by subject<select .value=${this.examSubject} @change=${(event) => { this.examSubject = event.target.value; this.selectionSearch = ''; this.randomCount = 10; this.requestUpdate(); }}><option value="">All subjects (${this.questions.length})</option>${this.questionCategories.map((value) => html`<option value=${value}>${value} (${this.questions.filter((q) => q.category === value).length})</option>`)}</select></label>
+            <div class="selection-switch"><button type="button" class=${this.selectionMode === 'manual' ? 'selected' : ''} @click=${() => { this.selectionMode = 'manual'; this.requestUpdate(); }}>☷ &nbsp; Manual selection</button><button type="button" class=${this.selectionMode === 'random' ? 'selected' : ''} @click=${() => { this.selectionMode = 'random'; this.requestUpdate(); }}>⤨ &nbsp; Random selection</button></div>
+            ${this.selectionMode === 'manual' ? html`<div class="selection-tools"><span>${this.examSubject ? `${availableForSubject.length} questions in ${this.examSubject}` : `${this.questions.length} questions across all subjects`}</span><label class="compact-search"><span>⌕</span><input placeholder="Find a question…" .value=${this.selectionSearch} @input=${(event) => { this.selectionSearch = event.target.value; this.requestUpdate(); }} /></label></div><div class="selection-list">${this.selectionQuestions.map((question) => html`<label class="selection-item"><input type="checkbox" .checked=${this.selectionIds.includes(question.id)} @change=${(event) => this.toggleSelectedQuestion(question.id, event.target.checked)} /><span class="selection-item-content"><div class="selection-item-head"><span class="category-pill">${question.category}</span><b>${question.question_text}</b></div><span class="selection-option-grid">${letters.map((letter) => html`<span class=${letter === question.correct_option ? 'selection-correct-option' : ''}><strong>${letter}.</strong> ${question[optionKeys[letter]]}${letter === question.correct_option ? html` <b class="correct-answer-label">✓ Correct answer</b>` : ''}</span>`)}</span>${question.explanation ? html`<small class="selection-explanation">Explanation: ${question.explanation}</small>` : ''}<small>${question.difficulty || 'Difficulty not set'}</small></span></label>`)}</div>` : html`<div class="random-maker"><label>Number of questions<input type="number" min="1" max=${Math.max(1, availableForSubject.length)} .value=${String(this.randomCount)} ?disabled=${!availableForSubject.length} @input=${(event) => { this.randomCount = event.target.value; this.requestUpdate(); }} /></label><button type="button" class="button button-outline" ?disabled=${!availableForSubject.length} @click=${this.regenerateRandom}>⟳ Regenerate selection</button><div class="random-preview"><span class="preview-icon">✧</span><div><b>${this.selectionIds.length ? `${this.selectionIds.length} questions selected` : 'Preview your random selection'}</b><small>${availableForSubject.length ? `Random picks use ${this.examSubject ? `${this.examSubject} questions.` : 'all available questions.'}` : 'No questions found.'}</small></div></div></div>`}
+          <div class="selection-footer"><span><b>${this.selectionIds.length}</b> question${this.selectionIds.length === 1 ? '' : 's'} selected${selectedCategories.length > 1 ? ` across ${selectedCategories.length} subjects` : selectedCategories.length === 1 ? ` (${selectedCategories[0]})` : ''}</span><span>1 mark each · −${Number(this.querySelector('[name="negative_mark"]')?.value || 1)} for a wrong answer</span></div>
+            ${selectedQuestions.length ? html`<div class="selected-questions-preview" aria-label="Full selected question preview">${selectedQuestions.map((q, index) => html`<article class="selected-question-preview"><div class="selected-preview-heading"><span>${String(index + 1).padStart(2, '0')}</span><span class="category-pill">${q.category}</span><b>${q.question_text}</b><button type="button" class="remove-selection-btn" title="Remove question" aria-label="Remove question ${index + 1}" @click=${() => this.toggleSelectedQuestion(q.id, false)}>×</button></div><div class="selection-option-grid">${letters.map((letter) => html`<span class=${letter === q.correct_option ? 'selection-correct-option' : ''}><strong>${letter}.</strong> ${q[optionKeys[letter]]}${letter === q.correct_option ? html` <b class="correct-answer-label">✓ Correct answer</b>` : ''}</span>`)}</div>${q.explanation ? html`<small class="selection-explanation">Explanation: ${q.explanation}</small>` : ''}</article>`)}</div>` : ''}
           </fieldset>
           <div class="field-row"><label>Wrong answer penalty<select name="negative_mark" required><option value="0">0 marks (No penalty)</option><option value="1">−1 mark</option><option value="0.25">−0.25 mark</option><option value="0.5">−0.50 mark</option></select><small class="field-help">Unanswered questions receive no penalty.</small></label><label>Initial status<select name="status"><option value="published">Published</option><option value="draft">Draft</option></select></label></div>
           <div class="settings-row"><div class="result-settings"><span class="setting-title">Student results</span><label class="check-setting"><input name="show_score" type="checkbox" @change=${(event) => { const answerBox = this.querySelector('[name="show_answers"]'); if (answerBox) { answerBox.disabled = !event.target.checked; if (!event.target.checked) answerBox.checked = false; } }} /><span><b>Show final score</b><small>Students can see their total mark.</small></span></label><label class="check-setting"><input name="show_answers" type="checkbox" disabled /><span><b>Show answer review</b><small>Students can review correct answers and explanations.</small></span></label></div></div>
@@ -978,6 +997,7 @@ class McqApp extends LitElement {
 
   renderAttempts(exam) {
     if (this.answerSheet && this.resultExam?.id === exam.id) return this.renderAnswerSheet();
+    const results = filterAndSortResults(this.attempts, this.resultSearch, this.resultSort);
     return html`<div class="attempts-panel">
       <div class="attempts-heading">
         <b>Participants</b>
@@ -986,7 +1006,18 @@ class McqApp extends LitElement {
           ${this.attempts.length ? html`<button class="button button-outline button-small" @click=${() => this.exportAttemptsCsv(exam)}>↓ Export CSV</button>` : ''}
         </div>
       </div>
-      ${this.attempts.length ? html`<div class="attempt-list">${this.attempts.map((attempt) => html`<div class="attempt-list-item"><button class="attempt-row" @click=${() => this.openAnswerSheet(attempt)}><span class="attempt-avatar">${attempt.student_name.slice(0, 1).toUpperCase()}</span><span class="attempt-person"><b>${attempt.student_name}</b><small>Roll ${attempt.roll_number}${attempt.email ? ` · ${attempt.email}` : ''}</small></span><span class="attempt-score">${attempt.score === null ? '—' : `${attempt.score} / ${exam.question_count}`}</span><span class="status-tag ${attempt.status}">${attempt.status.replace('_', ' ')}</span><span class="row-arrow">→</span></button><button class="button button-danger button-small" aria-label=${`Delete result sheet for ${attempt.student_name}, roll ${attempt.roll_number}`} @click=${() => this.deleteAttempt(attempt)}>Delete result sheet</button></div>`)}</div>` : html`<div class="empty-inline">No participants yet. Share the published exam link with students.</div>`}
+      ${this.attempts.length ? html`<div class="result-list-controls">
+        <label>Search results<input type="search" placeholder="Search by name or roll number…" .value=${this.resultSearch} @input=${event => { this.resultSearch = event.target.value; this.requestUpdate(); }} /></label>
+        <label>Sort results<select .value=${this.resultSort} @change=${event => { this.resultSort = event.target.value; this.requestUpdate(); }}>
+          <option value="recent">Most recent first</option>
+          <option value="roll-asc">Roll number: ascending</option>
+          <option value="roll-desc">Roll number: descending</option>
+          <option value="score-asc">Score: lowest first</option>
+          <option value="score-desc">Score: highest first</option>
+        </select></label>
+        <span class="result-match-count" role="status">${results.length} of ${this.attempts.length} results</span>
+      </div>` : ''}
+      ${results.length ? html`<div class="attempt-list">${results.map((attempt) => html`<div class="attempt-list-item"><button class="attempt-row" @click=${() => this.openAnswerSheet(attempt)}><span class="attempt-avatar">${attempt.student_name.slice(0, 1).toUpperCase()}</span><span class="attempt-person"><b>${attempt.student_name}</b><small>Roll ${attempt.roll_number}${attempt.email ? ` · ${attempt.email}` : ''}</small></span><span class="attempt-score">${attempt.score === null ? '—' : `${attempt.score} / ${exam.question_count}`}</span><span class="status-tag ${attempt.status}">${attempt.status.replace('_', ' ')}</span><span class="row-arrow">→</span></button><button class="button button-danger button-small" aria-label=${`Delete result sheet for ${attempt.student_name}, roll ${attempt.roll_number}`} @click=${() => this.deleteAttempt(attempt)}>Delete result sheet</button></div>`)}</div>` : html`<div class="empty-inline">${this.attempts.length ? "No results match your search. Try another name or roll number." : "No participants yet. Share the published exam link with students."}</div>`}
     </div>`;
   }
 

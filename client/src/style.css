@@ -446,9 +446,13 @@ input[type=checkbox] { accent-color: var(--purple); }
 .selected-questions-preview { max-height: 300px; }
 .selected-question-preview { padding: 9px 10px; border-bottom: 1px solid #f2f2f5; }
 .selected-question-preview:last-child { border-bottom: 0; }
+.selection-item-head { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.category-pill { padding: 2px 7px; border-radius: 4px; font-size: 11px; font-weight: 650; color: #5f52cf; background: #eeecfc; white-space: nowrap; flex-shrink: 0; }
 .selected-preview-heading { display: flex; align-items: flex-start; gap: 8px; }
 .selected-preview-heading > span { padding-top: 1px; color: #9c9eaa; font-size: 12px; }
-.selected-preview-heading > b { overflow: visible; color: #555b6d; font-size: 12px; font-weight: 600; line-height: 1.45; white-space: normal; }
+.selected-preview-heading > b { flex: 1; overflow: visible; color: #555b6d; font-size: 12px; font-weight: 600; line-height: 1.45; white-space: normal; }
+.remove-selection-btn { margin-left: auto; width: 20px; height: 20px; border: 0; border-radius: 4px; background: transparent; color: #9c9eaa; font-size: 16px; line-height: 1; cursor: pointer; display: grid; place-items: center; }
+.remove-selection-btn:hover { background: #fee2e2; color: #dc2626; }
 .selected-question-preview .selection-option-grid { margin-left: 27px; }
 .exam-share-row { margin-top: 9px; padding: 8px 10px; display: flex; align-items: center; gap: 10px; border: 1px solid #e9e7f8; border-radius: 7px; color: #9296a5; background: #fcfbff; font-size: 12px; }
 .exam-share-row a { min-width: 0; color: #6256c7; overflow-wrap: anywhere; text-decoration: none; }
@@ -732,6 +736,10 @@ body {
 }
 
 .attempt-list-item { display: flex; align-items: center; gap: 8px; border-bottom: 1px solid #f1f1f5; }
+.result-list-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin: 16px 0; padding: 14px; border: 1px solid #ffffffd9; border-radius: 14px; background: #ffffff80; }
+.result-list-controls label { display: flex; flex: 1 1 180px; min-width: 0; flex-direction: column; gap: 7px; font-size: 12px; font-weight: 650; color: #526079; }
+.result-list-controls input, .result-list-controls select { min-height: 44px; }
+.result-match-count { flex: 1 0 100%; color: #68748a; font-size: 12px; }
 .attempt-list-item .attempt-row { flex: 1; min-width: 0; border-bottom: 0; }
 .attempt-list-item > .button { flex-shrink: 0; }
 @media (max-width: 600px) {
