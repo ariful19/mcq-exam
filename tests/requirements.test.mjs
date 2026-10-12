@@ -242,9 +242,14 @@ test('MCQ requirements work through the local API and persist in SQLite', { time
     response = await anonymous(`/api/attempts/${legacyToken}/submit`, { method: 'POST' });
     assert.equal(response.data.result.score, 0, 'Existing zero-penalty exams must keep their original grading.');
 
-    for (const route of ['/api/admin/backup', `/api/admin/exams/${examId}`, `/api/admin/attempts/${attempt.id}`]) {
-      assert.equal((await anonymous(route, { method: route.endsWith('backup') ? 'GET' : 'DELETE' })).status, 401);
+    for (const route of ['/api/admin/backup', `/api/admin/exams/${examId}`, `/api/admin/attempts/${attempt.id}`, `/api/admin/exams/${examId}/shorten`]) {
+      assert.equal((await anonymous(route, { method: route.endsWith('backup') ? 'GET' : route.endsWith('shorten') ? 'POST' : 'DELETE' })).status, 401);
     }
+    assert.equal((await admin(`/api/admin/exams/${examId}/short_url`, { method: 'PATCH', body: { short_url: 'https://is.gd/test_exam_short' } })).status, 200);
+    const shortCached = await admin(`/api/admin/exams/${examId}/shorten`, { method: 'POST' });
+    assert.equal(shortCached.status, 200);
+    assert.equal(shortCached.data.short_url, 'https://is.gd/test_exam_short');
+    assert.equal(shortCached.data.cached, true);
     const backup = await admin('/api/admin/backup');
     assert.equal(backup.status, 200);
     assert.equal(backup.data.format, 'mcq-database-backup');
@@ -299,7 +304,7 @@ test('Hosted backend preserves question history and exports and deletes data', a
   const { default: worker } = await import('../dist/server/index.js');
   const sqlite = new Database(':memory:');
   sqlite.pragma('foreign_keys = ON');
-  for (const file of ['0000_green_maggott.sql', '0001_supreme_inertia.sql', '0002_long_clea.sql']) {
+  for (const file of ['0000_green_maggott.sql', '0001_supreme_inertia.sql', '0002_long_clea.sql', '0003_add_short_url.sql']) {
     sqlite.exec(readFileSync(path.join(root, 'drizzle', file), 'utf8'));
   }
   const DB = {
@@ -328,6 +333,10 @@ test('Hosted backend preserves question history and exports and deletes data', a
     cookie = login.headers.get('set-cookie').split(';')[0];
     const questions = await (await call('/api/admin/questions')).json();
     const exam = sqlite.prepare('SELECT * FROM exams LIMIT 1').get();
+    assert.equal((await call(`/api/admin/exams/${exam.id}/short_url`, 'PATCH', { short_url: 'https://is.gd/worker_cached' })).status, 200);
+    const workerShort = await (await call(`/api/admin/exams/${exam.id}/shorten`, 'POST')).json();
+    assert.equal(workerShort.short_url, 'https://is.gd/worker_cached');
+    assert.equal(workerShort.cached, true);
     const old = sqlite.prepare('SELECT q.* FROM questions q JOIN exam_questions eq ON eq.question_id=q.id WHERE eq.exam_id=? LIMIT 1').get(exam.id);
     const edit = await call(`/api/admin/questions/${old.id}`, 'PUT', { ...old, question_text: 'Updated version', correct_option: 'D' });
     assert.equal(edit.status, 200);

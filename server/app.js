@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { db, databasePath } from './db.js';
+import { shortenWithIsgd } from './isgd.js';
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
@@ -212,6 +213,8 @@ app.put('/api/admin/settings', requireAdmin, (req, res) => {
     'hero_tagline',
     'footer_copyright',
     'footer_tagline',
+    'public_url',
+    'enable_short_urls',
   ];
   const updates = req.body || {};
   const upsert = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
@@ -474,6 +477,77 @@ app.patch('/api/admin/exams/:id/settings', requireAdmin, (req, res) => {
   if (showAnswers && !showScore) return apiError(res, 400, 'Show score must be enabled to show answer review.');
   db.prepare('UPDATE exams SET show_score=?, show_answers=? WHERE id=?').run(showScore, showAnswers, Number(req.params.id));
   res.json({ ok: true, show_score: showScore, show_answers: showAnswers });
+});
+
+app.post('/api/admin/exams/:id/shorten', requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const exam = db.prepare('SELECT * FROM exams WHERE id=?').get(id);
+  if (!exam) return apiError(res, 404, 'Exam not found.');
+  if (exam.status !== 'published') return apiError(res, 400, 'Only published exams can be shared with a short link.');
+
+  const force = Boolean(req.body?.force);
+  const customAlias = String(req.body?.shorturl || '').trim();
+
+  if (exam.short_url && !force && !customAlias) {
+    return res.json({ ok: true, short_url: exam.short_url, cached: true });
+  }
+
+  const enabledRow = db.prepare("SELECT value FROM settings WHERE key='enable_short_urls'").get();
+  const isEnabled = enabledRow?.value === '1' || enabledRow?.value === 'true' || process.env.ENABLE_ISGD_SHORTENER === 'true';
+  if (!isEnabled && !force) {
+    return apiError(res, 400, 'is.gd URL shortening is currently disabled in portal settings. Enable it once you have a public domain name.');
+  }
+
+  const settingsRow = db.prepare("SELECT value FROM settings WHERE key='public_url'").get();
+  const configuredBase = String(settingsRow?.value || '').trim();
+  let longUrl = String(req.body?.url || '').trim();
+  if (!longUrl) {
+    if (configuredBase) {
+      longUrl = new URL(`/exam/${exam.id}`, configuredBase).href;
+    } else {
+      const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+      const host = req.headers['x-forwarded-host'] || req.get('host') || 'localhost:3000';
+      longUrl = `${protocol}://${host}/exam/${exam.id}`;
+    }
+  }
+
+  try {
+    const result = await shortenWithIsgd(longUrl, {
+      shorturl: customAlias || undefined,
+      logstats: req.body?.logstats,
+    });
+    db.prepare('UPDATE exams SET short_url = ? WHERE id = ?').run(result.shorturl, id);
+    res.json({ ok: true, short_url: result.shorturl, exam_id: id });
+  } catch (err) {
+    const hint = err.code === 1 ? 'is.gd requires a publicly accessible URL (localhost cannot be shortened).' :
+      err.code === 2 ? 'The custom short URL was rejected or is already taken.' :
+      err.code === 3 ? 'Rate limit exceeded on is.gd. Please wait 1 minute before trying again.' :
+      'Shortening service error.';
+    return apiError(res, 400, err.message, [hint]);
+  }
+});
+
+app.patch('/api/admin/exams/:id/short_url', requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  const exam = db.prepare('SELECT id FROM exams WHERE id=?').get(id);
+  if (!exam) return apiError(res, 404, 'Exam not found.');
+  const shortUrl = String(req.body?.short_url || '').trim();
+  db.prepare('UPDATE exams SET short_url = ? WHERE id = ?').run(shortUrl, id);
+  res.json({ ok: true, short_url: shortUrl });
+});
+
+app.post('/api/admin/shorten', requireAdmin, async (req, res) => {
+  const url = String(req.body?.url || '').trim();
+  if (!url) return apiError(res, 400, 'Please specify a URL to shorten.');
+  try {
+    const result = await shortenWithIsgd(url, {
+      shorturl: req.body?.shorturl,
+      logstats: req.body?.logstats,
+    });
+    res.json({ ok: true, short_url: result.shorturl });
+  } catch (err) {
+    return apiError(res, 400, err.message);
+  }
 });
 
 app.get('/api/admin/exams/:id/questions', requireAdmin, (req, res) => {

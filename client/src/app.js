@@ -75,6 +75,7 @@ class McqApp extends LitElement {
     this.adminLoginError = '';
     this.passwordError = '';
     this.passwordBusy = false;
+    this.shorteningExamId = null;
     this.resumeToken = sessionStorage.getItem('mcq-attempt-token') || '';
     this.settings = {
       site_title: 'Northstar',
@@ -83,12 +84,18 @@ class McqApp extends LitElement {
       hero_title: 'Your next step starts here.',
       hero_description: 'Focused assessments, a clear path forward. Choose an examination below when you’re ready.',
       hero_tagline: 'A calm space to do your best work',
+      public_url: '',
+      enable_short_urls: '0',
       footer_copyright: 'Northstar Examination Portal',
       footer_tagline: 'Thoughtful assessment, made simple ✦',
     };
     this.settingsBusy = false;
     this.settingsError = '';
     this.submitConfirmOpen = false;
+  }
+
+  get isShortenerEnabled() {
+    return this.settings?.enable_short_urls === '1' || this.settings?.enable_short_urls === 'true' || this.settings?.enable_short_urls === true;
   }
 
   connectedCallback() {
@@ -391,22 +398,99 @@ class McqApp extends LitElement {
       this.examSubject = '';
       form.reset();
       await this.loadAdminData();
-      if (created.status === 'published') this.notify(`Examination created. Share ${this.examUrl(created)} with students.`);
-      else this.notify('Examination created as a draft. Publish it to enable its public link.');
+      if (created.status === 'published') {
+        let shareUrl = this.examUrl(created);
+        if (this.isShortenerEnabled) {
+          try {
+            const shortUrl = await this.shortenExam(created);
+            if (shortUrl) shareUrl = shortUrl;
+          } catch { /* falls back to standard link */ }
+        }
+        this.notify(`Examination created. Share ${shareUrl} with students.`);
+      } else {
+        this.notify('Examination created as a draft. Publish it to enable its public link.');
+      }
     } catch (error) { this.notify([error.message, ...(error.details || [])].join(' '), 'error'); }
     finally { this.busy = false; this.requestUpdate(); }
   }
 
-  examUrl(exam) { return new URL(`/exam/${exam.id}`, location.origin).href; }
+  examUrl(exam) {
+    const base = this.settings?.public_url?.trim() || location.origin;
+    return new URL(`/exam/${exam.id}`, base).href;
+  }
+
+  async shortenExam(exam, options = {}) {
+    if (exam.status !== 'published') return null;
+    this.shorteningExamId = exam.id;
+    this.requestUpdate();
+    try {
+      const payload = {
+        url: this.examUrl(exam),
+        force: Boolean(options.force),
+        shorturl: options.shorturl || undefined,
+      };
+      const res = await api(`/api/admin/exams/${exam.id}/shorten`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      exam.short_url = res.short_url;
+      const target = this.exams.find((e) => e.id === exam.id);
+      if (target) target.short_url = res.short_url;
+      return res.short_url;
+    } catch (err) {
+      const msg = [err.message, ...(err.details || [])].filter(Boolean).join(' ');
+      throw new Error(msg || 'Could not shorten link');
+    } finally {
+      this.shorteningExamId = null;
+      this.requestUpdate();
+    }
+  }
 
   async copyExamLink(exam) {
     if (exam.status !== 'published') return;
-    const url = this.examUrl(exam);
+    let url = this.examUrl(exam);
+    let isShort = false;
+
+    if (this.isShortenerEnabled) {
+      if (exam.short_url) {
+        url = exam.short_url;
+        isShort = true;
+      } else {
+        try {
+          const short = await this.shortenExam(exam);
+          if (short) {
+            url = short;
+            isShort = true;
+          }
+        } catch (err) {
+          this.notify(`Notice: ${err.message}. Copied direct exam link instead.`, 'error');
+        }
+      }
+    }
+
     try {
       await navigator.clipboard.writeText(url);
-      this.notify('Public exam link copied.');
+      this.notify(isShort ? `Shortened exam link copied: ${url}` : 'Public exam link copied.');
     } catch {
-      await this.confirmMessage('Copy this public exam link:', { value: url, info: true });
+      await this.confirmMessage(isShort ? 'Copy this shortened exam link:' : 'Copy this public exam link:', { value: url, info: true });
+    }
+  }
+
+  async promptCustomizeShortUrl(exam) {
+    const input = window.prompt(
+      'Enter custom short URL alias (5-30 letters/numbers/underscores), or leave empty for a random is.gd link:',
+      ''
+    );
+    if (input === null) return;
+    try {
+      const short = await this.shortenExam(exam, { shorturl: input.trim() || undefined, force: true });
+      if (short) {
+        await navigator.clipboard.writeText(short).catch(() => {});
+        this.notify(`Short link created and copied: ${short}`);
+      }
+    } catch (err) {
+      this.notify(err.message, 'error');
     }
   }
 
@@ -414,6 +498,7 @@ class McqApp extends LitElement {
     event.preventDefault();
     const form = event.currentTarget;
     const values = Object.fromEntries(new FormData(form));
+    values.enable_short_urls = form.elements.enable_short_urls?.checked ? '1' : '0';
     this.settingsBusy = true;
     this.settingsError = '';
     this.requestUpdate();
@@ -466,6 +551,9 @@ class McqApp extends LitElement {
       await this.loadAdminData();
       this.notify(`Exam marked ${status}.`);
       await this.loadPublicExams();
+      if (status === 'published' && this.isShortenerEnabled && !exam.short_url) {
+        this.shortenExam(exam).catch(() => {});
+      }
     } catch (error) { this.notify(error.message, 'error'); }
   }
 
@@ -943,6 +1031,19 @@ class McqApp extends LitElement {
           <label>Footer tagline
             <input name="footer_tagline" maxlength="120" .value=${this.settings.footer_tagline || ''} placeholder="e.g. Thoughtful assessment, made simple ✦" />
           </label>
+          <div class="field-row">
+            <label class="check-setting" style="align-self: flex-start; margin-top: 6px;">
+              <input name="enable_short_urls" type="checkbox" .checked=${this.isShortenerEnabled} value="1" />
+              <span>
+                <b>Enable is.gd URL shortener</b>
+                <small>Keep disabled while using an IP address. Activate once you have a public domain name (is.gd rejects direct IP addresses).</small>
+              </span>
+            </label>
+            <label>Public domain name
+              <input name="public_url" maxlength="255" .value=${this.settings.public_url || ''} placeholder="e.g. https://exams.example.com" />
+              <small class="field-help">Optional domain URL used when shortening links.</small>
+            </label>
+          </div>
           ${this.settingsError ? html`<div class="inline-error">${this.settingsError}</div>` : ''}
           <button class="button button-primary" ?disabled=${this.settingsBusy}>
             ${this.settingsBusy ? 'Saving settings…' : 'Save portal settings'}
@@ -987,8 +1088,8 @@ class McqApp extends LitElement {
         </form>
       </div>
       <div class="admin-panel exam-list-panel"><div class="panel-heading"><div><h2>Your examinations</h2><p>Review status and participant results.</p></div><span class="exam-total">${this.exams.length}</span></div>
-        ${this.exams.length ? html`<div class="admin-exam-list">${this.exams.map((exam) => html`<article class="admin-exam-card"><div class="admin-exam-title"><div class="exam-list-icon">▣</div><div><h3>${exam.title}</h3><p>${exam.subject || 'No subject'} · ${exam.question_count} questions · ${exam.duration_minutes} min · −${Number(exam.negative_mark || 0)} wrong · ${exam.participant_count} participant${exam.participant_count === 1 ? '' : 's'}</p></div><span class="status-tag ${exam.status}">${exam.status}</span></div><div class="exam-list-actions"><label class="status-control">Status <select .value=${exam.status} @change=${(event) => this.changeExamStatus(exam, event.target.value)}><option value="draft">Draft</option><option value="published">Published</option><option value="closed">Closed</option></select></label><button class="button button-outline button-small" ?disabled=${exam.status !== 'published'} @click=${() => this.copyExamLink(exam)}>Copy link</button><a class="button button-quiet button-small" href=${exam.status === 'published' ? this.examUrl(exam) : undefined} ?hidden=${exam.status !== 'published'}>Open ↗</a><button class="button button-outline button-small" @click=${() => this.loadAttempts(exam)}>View results <span>→</span></button><button class="button button-danger button-small" @click=${() => this.deleteExam(exam)}>Delete exam</button></div>
-            ${exam.status === 'published' ? html`<div class="exam-share-row"><span>Public exam link</span><a href=${this.examUrl(exam)}>${this.examUrl(exam)}</a></div>` : html`<div class="exam-share-row unavailable-share"><span>Public link available after publishing</span></div>`}
+        ${this.exams.length ? html`<div class="admin-exam-list">${this.exams.map((exam) => html`<article class="admin-exam-card"><div class="admin-exam-title"><div class="exam-list-icon">▣</div><div><h3>${exam.title}</h3><p>${exam.subject || 'No subject'} · ${exam.question_count} questions · ${exam.duration_minutes} min · −${Number(exam.negative_mark || 0)} wrong · ${exam.participant_count} participant${exam.participant_count === 1 ? '' : 's'}</p></div><span class="status-tag ${exam.status}">${exam.status}</span></div><div class="exam-list-actions"><label class="status-control">Status <select .value=${exam.status} @change=${(event) => this.changeExamStatus(exam, event.target.value)}><option value="draft">Draft</option><option value="published">Published</option><option value="closed">Closed</option></select></label><button class="button button-outline button-small" ?disabled=${exam.status !== 'published'} @click=${() => this.copyExamLink(exam)}>${this.shorteningExamId === exam.id ? 'Shortening…' : 'Copy link'}</button><a class="button button-quiet button-small" href=${exam.status === 'published' ? ((this.isShortenerEnabled && exam.short_url) || this.examUrl(exam)) : undefined} ?hidden=${exam.status !== 'published'} target="_blank" rel="noopener">Open ↗</a><button class="button button-outline button-small" @click=${() => this.loadAttempts(exam)}>View results <span>→</span></button><button class="button button-danger button-small" @click=${() => this.deleteExam(exam)}>Delete exam</button></div>
+            ${exam.status === 'published' ? (this.isShortenerEnabled ? html`<div class="exam-share-row"><div class="exam-share-link-group"><span class="share-tag ${exam.short_url ? 'isgd' : 'direct'}">${exam.short_url ? 'is.gd short link' : 'Exam link'}</span><a href=${exam.short_url || this.examUrl(exam)} target="_blank" rel="noopener" class="exam-share-anchor">${exam.short_url || this.examUrl(exam)}</a></div><div class="exam-share-actions"><button type="button" class="button button-quiet button-small" @click=${() => this.promptCustomizeShortUrl(exam)} title="Customize or regenerate is.gd short URL">${exam.short_url ? 'Customize ✎' : 'Shorten ✂'}</button></div></div>` : html`<div class="exam-share-row"><span>Public exam link</span><a href=${this.examUrl(exam)} target="_blank" rel="noopener">${this.examUrl(exam)}</a></div>`) : html`<div class="exam-share-row unavailable-share"><span>Public link available after publishing</span></div>`}
             <div class="exam-visibility"><span>Student results</span><label title="Show final score to students"><input type="checkbox" .checked=${Boolean(exam.show_score)} @change=${(event) => this.changeExamVisibility(exam, 'score', event.target.checked)} /> Show score</label><label title="Show individual answer review to students"><input type="checkbox" .checked=${Boolean(exam.show_answers)} ?disabled=${!exam.show_score} @change=${(event) => this.changeExamVisibility(exam, 'answers', event.target.checked)} /> Show answers</label></div>
             ${this.resultExam?.id === exam.id ? this.renderAttempts(exam) : ''}</article>`)}</div>` : html`<div class="empty-state"><div class="empty-illustration">▣</div><h3>No examinations yet</h3><p>Build one from the question bank to get started.</p></div>`}
       </div>

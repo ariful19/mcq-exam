@@ -23,6 +23,7 @@ export const exams = sqliteTable('exams', {
   duration_minutes: integer('duration_minutes').notNull(),
   subject: text('subject').notNull().default(''),
   negative_mark: real('negative_mark').notNull().default(0),
+  short_url: text('short_url').notNull().default(''),
   status: text('status').notNull().default('draft'),
   show_score: integer('show_score').notNull().default(0),
   show_answers: integer('show_answers').notNull().default(0),

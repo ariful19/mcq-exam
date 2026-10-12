@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import * as XLSX from 'xlsx/xlsx.mjs';
 import seedData from '../site-seed.json';
 import { CLIENT_ASSETS } from 'virtual:client-assets';
+import { shortenWithIsgd } from '../server/isgd.js';
 
 const app = new Hono();
 const optionKeys = { A: 'option_a', B: 'option_b', C: 'option_c', D: 'option_d' };
@@ -478,6 +479,64 @@ app.patch('/api/admin/exams/:id/settings', requireAdmin, async (c) => {
   if (showAnswers && !showScore) return apiError(c, 400, 'Show score must be enabled to show answer review.');
   await c.env.DB.prepare('UPDATE exams SET show_score=?,show_answers=? WHERE id=?').bind(showScore,showAnswers,id).run();
   return c.json({ ok: true, show_score: showScore, show_answers: showAnswers });
+});
+
+app.post('/api/admin/exams/:id/shorten', requireAdmin, async (c) => {
+  const id = Number(c.req.param('id'));
+  const exam = await c.env.DB.prepare('SELECT * FROM exams WHERE id=?').bind(id).first();
+  if (!exam) return apiError(c, 404, 'Exam not found.');
+  if (exam.status !== 'published') return apiError(c, 400, 'Only published exams can be shared with a short link.');
+
+  const body = await c.req.json().catch(() => ({}));
+  const force = Boolean(body.force);
+  const customAlias = String(body.shorturl || '').trim();
+
+  if (exam.short_url && !force && !customAlias) {
+    return c.json({ ok: true, short_url: exam.short_url, cached: true });
+  }
+
+  const enabledRow = await c.env.DB.prepare("SELECT value FROM settings WHERE key='enable_short_urls'").first();
+  const isEnabled = enabledRow?.value === '1' || enabledRow?.value === 'true';
+  if (!isEnabled && !force) {
+    return apiError(c, 400, 'is.gd URL shortening is currently disabled in portal settings. Enable it once you have a public domain name.');
+  }
+
+  const settingsRow = await c.env.DB.prepare("SELECT value FROM settings WHERE key='public_url'").first();
+  const configuredBase = String(settingsRow?.value || '').trim();
+  let longUrl = String(body.url || '').trim();
+  if (!longUrl) {
+    if (configuredBase) {
+      longUrl = new URL(`/exam/${exam.id}`, configuredBase).href;
+    } else {
+      const origin = new URL(c.req.url).origin;
+      longUrl = `${origin}/exam/${exam.id}`;
+    }
+  }
+
+  try {
+    const result = await shortenWithIsgd(longUrl, {
+      shorturl: customAlias || undefined,
+      logstats: body.logstats,
+    });
+    await c.env.DB.prepare('UPDATE exams SET short_url=? WHERE id=?').bind(result.shorturl, id).run();
+    return c.json({ ok: true, short_url: result.shorturl, exam_id: id });
+  } catch (err) {
+    const hint = err.code === 1 ? 'is.gd requires a publicly accessible URL (localhost cannot be shortened).' :
+      err.code === 2 ? 'The custom short URL was rejected or is already taken.' :
+      err.code === 3 ? 'Rate limit exceeded on is.gd. Please wait 1 minute before trying again.' :
+      'Shortening service error.';
+    return apiError(c, 400, err.message, [hint]);
+  }
+});
+
+app.patch('/api/admin/exams/:id/short_url', requireAdmin, async (c) => {
+  const id = Number(c.req.param('id'));
+  const exam = await c.env.DB.prepare('SELECT id FROM exams WHERE id=?').bind(id).first();
+  if (!exam) return apiError(c, 404, 'Exam not found.');
+  const body = await c.req.json().catch(() => ({}));
+  const shortUrl = String(body.short_url || '').trim();
+  await c.env.DB.prepare('UPDATE exams SET short_url=? WHERE id=?').bind(shortUrl, id).run();
+  return c.json({ ok: true, short_url: shortUrl });
 });
 
 app.get('/api/admin/exams/:id/questions', requireAdmin, async (c) => {

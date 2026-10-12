@@ -33,6 +33,7 @@ db.exec(`
     show_answers INTEGER NOT NULL DEFAULT 0 CHECK (show_answers IN (0,1)),
     subject TEXT NOT NULL DEFAULT '',
     negative_mark REAL NOT NULL DEFAULT 0,
+    short_url TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CHECK (show_answers = 0 OR show_score = 1)
   );
@@ -93,6 +94,7 @@ db.transaction(() => {
   addColumnIfMissing('questions', 'explanation', "explanation TEXT NOT NULL DEFAULT ''");
   addColumnIfMissing('exams', 'subject', "subject TEXT NOT NULL DEFAULT ''");
   addColumnIfMissing('exams', 'negative_mark', 'negative_mark REAL NOT NULL DEFAULT 0');
+  addColumnIfMissing('exams', 'short_url', "short_url TEXT NOT NULL DEFAULT ''");
   addColumnIfMissing('attempts', 'address', "address TEXT NOT NULL DEFAULT ''");
 })();
 
@@ -150,6 +152,8 @@ const defaultSettings = {
   hero_tagline: 'A calm space to do your best work',
   footer_copyright: 'Northstar Examination Portal',
   footer_tagline: 'Thoughtful assessment, made simple ✦',
+  public_url: '',
+  enable_short_urls: '0',
 };
 
 const insertSetting = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
