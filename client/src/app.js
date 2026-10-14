@@ -3,6 +3,7 @@ import { keyed } from 'lit/directives/keyed.js';
 import './style.css';
 import { installMotion, appear, disappear, slideQuestion } from './motion.js';
 import { filterAndSortResults } from './results.js';
+import { generateResultPdf } from './pdf.js';
 
 const letters = ['A', 'B', 'C', 'D'];
 const optionKeys = { A: 'option_a', B: 'option_b', C: 'option_c', D: 'option_d' };
@@ -388,7 +389,9 @@ class McqApp extends LitElement {
       title: values.title, description: values.description, duration_minutes: Number(values.duration_minutes),
       subject: examSubject, negative_mark: Number(values.negative_mark),
       status: values.status, show_score: form.elements.show_score.checked,
-      show_answers: form.elements.show_answers.checked, question_ids: selected,
+      show_answers: form.elements.show_answers.checked,
+      allow_pdf_download: Boolean(form.elements.allow_pdf_download?.checked),
+      question_ids: selected,
     };
     this.busy = true;
     try {
@@ -560,11 +563,12 @@ class McqApp extends LitElement {
   async changeExamVisibility(exam, field, checked) {
     const showScore = field === 'score' ? checked : Boolean(exam.show_score);
     const showAnswers = field === 'answers' ? checked : Boolean(exam.show_answers);
+    const allowPdfDownload = field === 'pdf' ? checked : Boolean(exam.allow_pdf_download);
     const nextShowAnswers = showScore ? showAnswers : false;
     try {
       await api(`/api/admin/exams/${exam.id}/settings`, {
         method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ show_score: showScore, show_answers: nextShowAnswers }),
+        body: JSON.stringify({ show_score: showScore, show_answers: nextShowAnswers, allow_pdf_download: allowPdfDownload }),
       });
       await this.loadAdminData();
       this.notify('Student result visibility updated.');
@@ -630,6 +634,34 @@ class McqApp extends LitElement {
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
     this.notify('Results exported to CSV.');
+  }
+
+  downloadResultPdf(sheet = null) {
+    try {
+      if (sheet) {
+        generateResultPdf({
+          attempt: sheet,
+          result: {
+            status: sheet.status,
+            score: sheet.score,
+            submittedAt: sheet.submitted_at,
+            answers: sheet.answers,
+          },
+          settings: this.settings,
+        });
+        this.notify('Answer sheet downloaded as PDF.');
+        return;
+      }
+      if (!this.attempt) return;
+      generateResultPdf({
+        attempt: this.attempt,
+        result: this.attempt.result || {},
+        settings: this.settings,
+      });
+      this.notify('Result sheet downloaded as PDF.');
+    } catch (error) {
+      this.notify(error.message || 'Failed to generate PDF.', 'error');
+    }
   }
 
   async openAnswerSheet(attempt) {
@@ -1083,14 +1115,14 @@ class McqApp extends LitElement {
             ${selectedQuestions.length ? html`<div class="selected-questions-preview" aria-label="Full selected question preview">${selectedQuestions.map((q, index) => html`<article class="selected-question-preview"><div class="selected-preview-heading"><span>${String(index + 1).padStart(2, '0')}</span><span class="category-pill">${q.category}</span><b>${q.question_text}</b><button type="button" class="remove-selection-btn" title="Remove question" aria-label="Remove question ${index + 1}" @click=${() => this.toggleSelectedQuestion(q.id, false)}>×</button></div><div class="selection-option-grid">${letters.map((letter) => html`<span class=${letter === q.correct_option ? 'selection-correct-option' : ''}><strong>${letter}.</strong> ${q[optionKeys[letter]]}${letter === q.correct_option ? html` <b class="correct-answer-label">✓ Correct answer</b>` : ''}</span>`)}</div>${q.explanation ? html`<small class="selection-explanation">Explanation: ${q.explanation}</small>` : ''}</article>`)}</div>` : ''}
           </fieldset>
           <div class="field-row"><label>Wrong answer penalty<select name="negative_mark" required><option value="0">0 marks (No penalty)</option><option value="1">−1 mark</option><option value="0.25">−0.25 mark</option><option value="0.5">−0.50 mark</option></select><small class="field-help">Unanswered questions receive no penalty.</small></label><label>Initial status<select name="status"><option value="published">Published</option><option value="draft">Draft</option></select></label></div>
-          <div class="settings-row"><div class="result-settings"><span class="setting-title">Student results</span><label class="check-setting"><input name="show_score" type="checkbox" @change=${(event) => { const answerBox = this.querySelector('[name="show_answers"]'); if (answerBox) { answerBox.disabled = !event.target.checked; if (!event.target.checked) answerBox.checked = false; } }} /><span><b>Show final score</b><small>Students can see their total mark.</small></span></label><label class="check-setting"><input name="show_answers" type="checkbox" disabled /><span><b>Show answer review</b><small>Students can review correct answers and explanations.</small></span></label></div></div>
+          <div class="settings-row"><div class="result-settings"><span class="setting-title">Student results</span><label class="check-setting"><input name="show_score" type="checkbox" @change=${(event) => { const answerBox = this.querySelector('[name="show_answers"]'); if (answerBox) { answerBox.disabled = !event.target.checked; if (!event.target.checked) answerBox.checked = false; } }} /><span><b>Show final score</b><small>Students can see their total mark.</small></span></label><label class="check-setting"><input name="show_answers" type="checkbox" disabled /><span><b>Show answer review</b><small>Students can review correct answers and explanations.</small></span></label><label class="check-setting"><input name="allow_pdf_download" type="checkbox" /><span><b>Allow PDF download</b><small>Students can download their result report and answer sheet with explanations as PDF.</small></span></label></div></div>
           <button class="button button-primary button-full" ?disabled=${this.busy}>${this.busy ? 'Creating examination…' : 'Create examination'} <span aria-hidden="true">→</span></button>
         </form>
       </div>
       <div class="admin-panel exam-list-panel"><div class="panel-heading"><div><h2>Your examinations</h2><p>Review status and participant results.</p></div><span class="exam-total">${this.exams.length}</span></div>
         ${this.exams.length ? html`<div class="admin-exam-list">${this.exams.map((exam) => html`<article class="admin-exam-card"><div class="admin-exam-title"><div class="exam-list-icon">▣</div><div><h3>${exam.title}</h3><p>${exam.subject || 'No subject'} · ${exam.question_count} questions · ${exam.duration_minutes} min · −${Number(exam.negative_mark || 0)} wrong · ${exam.participant_count} participant${exam.participant_count === 1 ? '' : 's'}</p></div><span class="status-tag ${exam.status}">${exam.status}</span></div><div class="exam-list-actions"><label class="status-control">Status <select .value=${exam.status} @change=${(event) => this.changeExamStatus(exam, event.target.value)}><option value="draft">Draft</option><option value="published">Published</option><option value="closed">Closed</option></select></label><button class="button button-outline button-small" ?disabled=${exam.status !== 'published'} @click=${() => this.copyExamLink(exam)}>${this.shorteningExamId === exam.id ? 'Shortening…' : 'Copy link'}</button><a class="button button-quiet button-small" href=${exam.status === 'published' ? ((this.isShortenerEnabled && exam.short_url) || this.examUrl(exam)) : undefined} ?hidden=${exam.status !== 'published'} target="_blank" rel="noopener">Open ↗</a><button class="button button-outline button-small" @click=${() => this.loadAttempts(exam)}>View results <span>→</span></button><button class="button button-danger button-small" @click=${() => this.deleteExam(exam)}>Delete exam</button></div>
             ${exam.status === 'published' ? (this.isShortenerEnabled ? html`<div class="exam-share-row"><div class="exam-share-link-group"><span class="share-tag ${exam.short_url ? 'isgd' : 'direct'}">${exam.short_url ? 'is.gd short link' : 'Exam link'}</span><a href=${exam.short_url || this.examUrl(exam)} target="_blank" rel="noopener" class="exam-share-anchor">${exam.short_url || this.examUrl(exam)}</a></div><div class="exam-share-actions"><button type="button" class="button button-quiet button-small" @click=${() => this.promptCustomizeShortUrl(exam)} title="Customize or regenerate is.gd short URL">${exam.short_url ? 'Customize ✎' : 'Shorten ✂'}</button></div></div>` : html`<div class="exam-share-row"><span>Public exam link</span><a href=${this.examUrl(exam)} target="_blank" rel="noopener">${this.examUrl(exam)}</a></div>`) : html`<div class="exam-share-row unavailable-share"><span>Public link available after publishing</span></div>`}
-            <div class="exam-visibility"><span>Student results</span><label title="Show final score to students"><input type="checkbox" .checked=${Boolean(exam.show_score)} @change=${(event) => this.changeExamVisibility(exam, 'score', event.target.checked)} /> Show score</label><label title="Show individual answer review to students"><input type="checkbox" .checked=${Boolean(exam.show_answers)} ?disabled=${!exam.show_score} @change=${(event) => this.changeExamVisibility(exam, 'answers', event.target.checked)} /> Show answers</label></div>
+            <div class="exam-visibility"><span>Student results</span><label title="Show final score to students"><input type="checkbox" .checked=${Boolean(exam.show_score)} @change=${(event) => this.changeExamVisibility(exam, 'score', event.target.checked)} /> Show score</label><label title="Show individual answer review to students"><input type="checkbox" .checked=${Boolean(exam.show_answers)} ?disabled=${!exam.show_score} @change=${(event) => this.changeExamVisibility(exam, 'answers', event.target.checked)} /> Show answers</label><label title="Allow students to download result as PDF"><input type="checkbox" .checked=${Boolean(exam.allow_pdf_download)} @change=${(event) => this.changeExamVisibility(exam, 'pdf', event.target.checked)} /> PDF download</label></div>
             ${this.resultExam?.id === exam.id ? this.renderAttempts(exam) : ''}</article>`)}</div>` : html`<div class="empty-state"><div class="empty-illustration">▣</div><h3>No examinations yet</h3><p>Build one from the question bank to get started.</p></div>`}
       </div>
     </section>`;
@@ -1125,7 +1157,7 @@ class McqApp extends LitElement {
   renderAnswerSheet() {
     const sheet = this.answerSheet;
     const graded = sheet.status !== 'in_progress';
-    return html`<div class="answer-sheet"><div class="sheet-header"><div><button class="back-link compact-back" @click=${() => { this.answerSheet = null; this.requestUpdate(); }}>← Participants</button><h3>${sheet.student_name}<span> · Roll ${sheet.roll_number}</span></h3><p>${sheet.exam_title} · ${sheet.email || 'No email provided'} · ${sheet.address || 'No address provided'}</p></div><div class="sheet-score"><b>${sheet.score}</b><small>FINAL SCORE</small></div></div><button class="button button-danger button-small" @click=${() => this.deleteAttempt(sheet)}>Delete result sheet</button><div class="sheet-meta"><span class="status-tag ${sheet.status}">${sheet.status.replace('_', ' ')}</span><span>Penalty: −${Number(this.resultExam?.negative_mark || 0)} for wrong answers</span><span>Started ${this.formatDate(sheet.started_at)}</span><span>${sheet.submitted_at ? `Submitted ${this.formatDate(sheet.submitted_at)}` : 'Not submitted'}</span></div>
+    return html`<div class="answer-sheet"><div class="sheet-header"><div><button class="back-link compact-back" @click=${() => { this.answerSheet = null; this.requestUpdate(); }}>← Participants</button><h3>${sheet.student_name}<span> · Roll ${sheet.roll_number}</span></h3><p>${sheet.exam_title} · ${sheet.email || 'No email provided'} · ${sheet.address || 'No address provided'}</p></div><div class="sheet-score"><b>${sheet.score}</b><small>FINAL SCORE</small></div></div><div class="sheet-controls"><button class="button button-outline button-small" @click=${() => this.downloadResultPdf(sheet)}>↓ Download PDF</button><button class="button button-danger button-small" @click=${() => this.deleteAttempt(sheet)}>Delete result sheet</button></div><div class="sheet-meta"><span class="status-tag ${sheet.status}">${sheet.status.replace('_', ' ')}</span><span>Penalty: −${Number(this.resultExam?.negative_mark || 0)} for wrong answers</span><span>Started ${this.formatDate(sheet.started_at)}</span><span>${sheet.submitted_at ? `Submitted ${this.formatDate(sheet.submitted_at)}` : 'Not submitted'}</span></div>
       <div class="sheet-questions">${sheet.answers.map((answer, index) => html`<article class="sheet-question ${graded ? answer.is_correct ? 'is-correct' : 'is-wrong' : 'is-pending'}"><div class="sheet-q-head"><span>QUESTION ${String(index + 1).padStart(2, '0')}</span><span class=${graded ? answer.is_correct ? 'correct-text' : 'wrong-text' : 'pending-text'}>${graded ? answer.is_correct ? '✓ Correct' : answer.selected_option ? '× Incorrect' : 'Not answered' : 'Not graded'}</span></div><h4>${answer.question_text}</h4><div class="sheet-answers">${letters.map((letter) => html`<div class="sheet-option ${letter === answer.correct_option ? 'right-option' : ''} ${graded && letter === answer.selected_option && !answer.is_correct ? 'chosen-wrong' : ''}"><span>${letter}</span><span>${answer[optionKeys[letter]]}</span>${letter === answer.selected_option ? html`<small class="student-label">STUDENT</small>` : ''}${letter === answer.correct_option ? html`<small>CORRECT</small>` : ''}</div>`)}</div>${answer.explanation ? html`<p class="answer-explanation"><b>Explanation</b> ${answer.explanation}</p>` : ''}<div class="marks-row"><span>Student selected <b>${answer.selected_option ? `Option ${answer.selected_option}` : 'No answer'}</b></span><span>${graded ? `${answer.marks_awarded ?? 0} / ${answer.marks} mark${answer.marks === 1 ? '' : 's'}` : 'Pending submission'}</span></div></article>`)}</div>
       <button class="button button-outline button-full back-sheet-button" @click=${() => { this.answerSheet = null; this.requestUpdate(); }}>← Back to participants</button>
     </div>`;
@@ -1204,6 +1236,7 @@ class McqApp extends LitElement {
     return html`<main class="result-page"><div class="result-card"><div class="result-success-icon">✓</div><span class="eyebrow muted">EXAMINATION COMPLETE</span><h1>${this.attempt?.exam_title || 'Your examination'}</h1><p class="result-greeting">Well done, ${this.attempt?.student_name || 'student'}.</p><div class="result-message">Your exam has been submitted successfully.</div>
       ${Object.hasOwn(result, 'score') ? html`<div class="student-score"><span>YOUR SCORE</span><strong>${result.score}<small> / ${this.attempt.questions.length}</small></strong><p>${result.status === 'auto_submitted' ? 'Submitted automatically when time expired' : 'Your examination has been submitted'}</p></div>` : ''}
       ${reviewed.length ? html`<div class="student-review"><div class="review-heading"><h2>Answer review</h2><span>${reviewed.filter((answer) => answer.is_correct).length} of ${reviewed.length} correct</span></div>${reviewed.map((answer, index) => html`<article class="review-item ${answer.is_correct ? 'is-correct' : 'is-wrong'}"><div class="review-item-head"><span>QUESTION ${String(index + 1).padStart(2, '0')}</span><b>${answer.is_correct ? '✓ Correct' : answer.selected_option ? '× Incorrect' : 'Not answered'}</b></div><h3>${answer.question_text}</h3><p>Your answer: <strong>${answer.selected_option ? `${answer.selected_option}. ${answer[optionKeys[answer.selected_option]]}` : 'Not answered'}</strong></p><p>Correct answer: <strong>${answer.correct_option}. ${answer[optionKeys[answer.correct_option]]}</strong></p>${answer.explanation ? html`<p class="answer-explanation"><b>Explanation</b> ${answer.explanation}</p>` : ''}<span class="review-mark">${answer.marks_awarded ?? 0} / ${answer.marks} mark</span></article>`)}</div>` : ''}
+      ${(result.allow_pdf_download || this.attempt?.allow_pdf_download) && reviewed.length ? html`<div class="result-download-section"><button class="button button-outline button-full download-pdf-btn" @click=${() => this.downloadResultPdf()}>↓ Download result as PDF</button></div>` : ''}
       <button class="button button-primary button-full" @click=${this.newAttempt}>Return to examinations <span>→</span></button>
     </div></main>`;
   }

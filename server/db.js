@@ -31,6 +31,7 @@ db.exec(`
     status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','published','closed')),
     show_score INTEGER NOT NULL DEFAULT 0 CHECK (show_score IN (0,1)),
     show_answers INTEGER NOT NULL DEFAULT 0 CHECK (show_answers IN (0,1)),
+    allow_pdf_download INTEGER NOT NULL DEFAULT 0 CHECK (allow_pdf_download IN (0,1)),
     subject TEXT NOT NULL DEFAULT '',
     negative_mark REAL NOT NULL DEFAULT 0,
     short_url TEXT NOT NULL DEFAULT '',
@@ -95,6 +96,7 @@ db.transaction(() => {
   addColumnIfMissing('exams', 'subject', "subject TEXT NOT NULL DEFAULT ''");
   addColumnIfMissing('exams', 'negative_mark', 'negative_mark REAL NOT NULL DEFAULT 0');
   addColumnIfMissing('exams', 'short_url', "short_url TEXT NOT NULL DEFAULT ''");
+  addColumnIfMissing('exams', 'allow_pdf_download', 'allow_pdf_download INTEGER NOT NULL DEFAULT 0');
   addColumnIfMissing('attempts', 'address', "address TEXT NOT NULL DEFAULT ''");
 })();
 
@@ -131,8 +133,8 @@ if (db.prepare('SELECT COUNT(*) AS count FROM questions').get().count === 0) {
 if (db.prepare('SELECT COUNT(*) AS count FROM exams').get().count === 0) {
   const questionIds = db.prepare('SELECT id FROM questions ORDER BY id LIMIT 10').all();
   const createDemo = db.transaction(() => {
-    const exam = db.prepare(`INSERT INTO exams (title, description, duration_minutes, status, show_score, show_answers)
-      VALUES (?, ?, ?, 'published', 1, 1)`).run(
+    const exam = db.prepare(`INSERT INTO exams (title, description, duration_minutes, status, show_score, show_answers, allow_pdf_download)
+      VALUES (?, ?, ?, 'published', 1, 1, 1)`).run(
       'Getting Started: General Knowledge',
       'A short sample exam to help you explore the examination portal.',
       15,

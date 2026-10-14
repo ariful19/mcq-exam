@@ -27,6 +27,7 @@ export const exams = sqliteTable('exams', {
   status: text('status').notNull().default('draft'),
   show_score: integer('show_score').notNull().default(0),
   show_answers: integer('show_answers').notNull().default(0),
+  allow_pdf_download: integer('allow_pdf_download').notNull().default(0),
   created_at: text('created_at').notNull().default(sql`CURRENT_TIMESTAMP`),
 }, (table) => [
   check('exams_status_check', sql`${table.status} IN ('draft','published','closed')`),

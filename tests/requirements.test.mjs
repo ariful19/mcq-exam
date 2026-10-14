@@ -215,10 +215,15 @@ test('MCQ requirements work through the local API and persist in SQLite', { time
     assert.equal(sheet.data.answers.find((item) => item.question_id === pasteId)?.marks_awarded, -0.25);
     assert.equal(sheet.data.answers.find((item) => item.question_id === excel.id)?.marks_awarded ?? 0, 0);
 
-    assert.equal((await admin(`/api/admin/exams/${examId}/settings`, { method: 'PATCH', body: { show_score: true, show_answers: true } })).status, 200);
+    assert.equal((await admin(`/api/admin/exams/${examId}/settings`, { method: 'PATCH', body: { show_score: true, show_answers: true, allow_pdf_download: true } })).status, 200);
     response = await anonymous(`/api/attempts/${token}`);
     assert.equal(response.data.result.score, 0.75);
+    assert.equal(response.data.result.allow_pdf_download, true);
+    assert.equal(response.data.allow_pdf_download, true);
     assert.equal(response.data.result.answers.find((item) => item.question_id === manualId)?.explanation, 'Manual explanation.');
+    assert.equal((await admin(`/api/admin/exams/${examId}/settings`, { method: 'PATCH', body: { allow_pdf_download: false } })).status, 200);
+    response = await anonymous(`/api/attempts/${token}`);
+    assert.equal(response.data.result.allow_pdf_download, false);
 
     for (const penalty of [0.5, 1]) {
       response = await admin('/api/admin/exams', { method: 'POST', body: { ...examBody, title: `Penalty ${penalty}`, negative_mark: penalty, question_ids: [manualId] } });
@@ -304,7 +309,7 @@ test('Hosted backend preserves question history and exports and deletes data', a
   const { default: worker } = await import('../dist/server/index.js');
   const sqlite = new Database(':memory:');
   sqlite.pragma('foreign_keys = ON');
-  for (const file of ['0000_green_maggott.sql', '0001_supreme_inertia.sql', '0002_long_clea.sql', '0003_add_short_url.sql']) {
+  for (const file of ['0000_green_maggott.sql', '0001_supreme_inertia.sql', '0002_long_clea.sql', '0003_add_short_url.sql', '0004_add_allow_pdf_download.sql']) {
     sqlite.exec(readFileSync(path.join(root, 'drizzle', file), 'utf8'));
   }
   const DB = {
@@ -375,3 +380,12 @@ test('Hosted backend preserves question history and exports and deletes data', a
     assert.equal((await call(`/api/admin/exams/${exam.id}`, 'DELETE')).status, 404);
   } finally { sqlite.close(); }
 });
+
+test('PDF helper sanitizes unicode and formats result documents cleanly', async () => {
+  const { cleanText } = await import('../client/src/pdf.js');
+  assert.equal(cleanText('Rajapur, Mograhat, Bagerhat, (সাথী স্টোর ফটোকপির দোকান)'), 'Rajapur, Mograhat, Bagerhat');
+  assert.equal(cleanText('Special “Quotes” & ‘Dashes’ — …'), 'Special "Quotes" & \'Dashes\' - ...');
+  assert.equal(cleanText(null), '');
+  assert.equal(cleanText(undefined), '');
+});
+

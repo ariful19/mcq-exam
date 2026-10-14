@@ -208,23 +208,27 @@ async function finalizeAttempt(db, attemptId, status) {
 async function enforceDeadline(db, attempt) {
   if (attempt?.status === 'in_progress' && Date.now() >= deadlineFor(attempt).getTime()) {
     await finalizeAttempt(db, attempt.id, 'auto_submitted');
-    return db.prepare(`SELECT a.*,e.title AS exam_title,e.duration_minutes,e.negative_mark,e.show_score,e.show_answers
+    return db.prepare(`SELECT a.*,e.title AS exam_title,e.duration_minutes,e.negative_mark,e.show_score,e.show_answers,e.allow_pdf_download
       FROM attempts a JOIN exams e ON e.id=a.exam_id WHERE a.access_token=?`).bind(attempt.access_token).first();
   }
   return attempt;
 }
 
 async function getStudentAttempt(db, token) {
-  const attempt = await db.prepare(`SELECT a.*,e.title AS exam_title,e.duration_minutes,e.negative_mark,e.show_score,e.show_answers
+  const attempt = await db.prepare(`SELECT a.*,e.title AS exam_title,e.duration_minutes,e.negative_mark,e.show_score,e.show_answers,e.allow_pdf_download
     FROM attempts a JOIN exams e ON e.id=a.exam_id WHERE a.access_token=?`).bind(token).first();
   return enforceDeadline(db, attempt);
 }
 
 async function safeResult(db, attempt, detailed) {
   if (!attempt || attempt.status === 'in_progress') return null;
-  const result = { status: attempt.status, submittedAt: attempt.submitted_at };
-  if (attempt.show_score) result.score = attempt.score;
-  if (detailed && attempt.show_answers && attempt.show_score) {
+  const result = {
+    status: attempt.status,
+    submittedAt: attempt.submitted_at,
+    allow_pdf_download: Boolean(attempt.allow_pdf_download),
+  };
+  if (attempt.show_score || attempt.allow_pdf_download) result.score = attempt.score;
+  if (detailed && ((attempt.show_answers && attempt.show_score) || attempt.allow_pdf_download)) {
     result.answers = await db.prepare(`SELECT q.id AS question_id,q.question_text,q.option_a,q.option_b,q.option_c,q.option_d,q.correct_option,q.explanation,
         eq.marks,a.selected_option,a.is_correct,a.marks_awarded FROM exam_questions eq JOIN questions q ON q.id=eq.question_id
       LEFT JOIN answers a ON a.question_id=q.id AND a.attempt_id=? WHERE eq.exam_id=? ORDER BY eq.sort_order,eq.id`)
@@ -420,6 +424,7 @@ app.post('/api/admin/exams', requireAdmin, async (c) => {
   const status = ['draft','published','closed'].includes(body.status) ? body.status : 'draft';
   const showScore = body.show_score ? 1 : 0;
   const showAnswers = body.show_answers ? 1 : 0;
+  const allowPdfDownload = body.allow_pdf_download ? 1 : 0;
   const ids = Array.isArray(body.question_ids) ? [...new Set(body.question_ids.map(Number).filter(Number.isSafeInteger))] : [];
   if (!title) return apiError(c, 400, 'Exam title is required.');
   if (!allowedNegativeMarks.includes(negativeMark)) return apiError(c, 400, 'Choose a negative mark of 1, 0.25, or 0.50.');
@@ -431,8 +436,8 @@ app.post('/api/admin/exams', requireAdmin, async (c) => {
   const distinctCategories = [...new Set((available.results || []).map((q) => q.category).filter(Boolean))];
   const subject = subjectInput || distinctCategories.join(', ') || 'General';
   if (!subject) return apiError(c, 400, 'Subject is required.');
-  const created = await c.env.DB.prepare(`INSERT INTO exams (title,description,duration_minutes,subject,negative_mark,status,show_score,show_answers) VALUES (?,?,?,?,?,?,?,?)`)
-    .bind(title,description,duration,subject,negativeMark,status,showScore,showAnswers).run();
+  const created = await c.env.DB.prepare(`INSERT INTO exams (title,description,duration_minutes,subject,negative_mark,status,show_score,show_answers,allow_pdf_download) VALUES (?,?,?,?,?,?,?,?,?)`)
+    .bind(title,description,duration,subject,negativeMark,status,showScore,showAnswers,allowPdfDownload).run();
   const examId = created.meta.last_row_id;
   await c.env.DB.batch(ids.map((questionId, index) => c.env.DB.prepare('INSERT INTO exam_questions (exam_id,question_id,marks,sort_order) VALUES (?,?,?,?)').bind(examId,questionId,1,index)));
   return c.json(await c.env.DB.prepare(`SELECT e.*,COUNT(eq.id) AS question_count FROM exams e
@@ -471,14 +476,15 @@ app.patch('/api/admin/exams/:id/status', requireAdmin, async (c) => {
 
 app.patch('/api/admin/exams/:id/settings', requireAdmin, async (c) => {
   const id = Number(c.req.param('id'));
-  const exam = await c.env.DB.prepare('SELECT show_score,show_answers FROM exams WHERE id=?').bind(id).first();
+  const exam = await c.env.DB.prepare('SELECT show_score,show_answers,allow_pdf_download FROM exams WHERE id=?').bind(id).first();
   if (!exam) return apiError(c, 404, 'Exam not found.');
   const body = await c.req.json().catch(() => ({}));
   const showScore = body.show_score === undefined ? Number(exam.show_score) : Number(Boolean(body.show_score));
   const showAnswers = body.show_answers === undefined ? Number(exam.show_answers) : Number(Boolean(body.show_answers));
+  const allowPdfDownload = body.allow_pdf_download === undefined ? Number(exam.allow_pdf_download) : Number(Boolean(body.allow_pdf_download));
   if (showAnswers && !showScore) return apiError(c, 400, 'Show score must be enabled to show answer review.');
-  await c.env.DB.prepare('UPDATE exams SET show_score=?,show_answers=? WHERE id=?').bind(showScore,showAnswers,id).run();
-  return c.json({ ok: true, show_score: showScore, show_answers: showAnswers });
+  await c.env.DB.prepare('UPDATE exams SET show_score=?,show_answers=?,allow_pdf_download=? WHERE id=?').bind(showScore,showAnswers,allowPdfDownload,id).run();
+  return c.json({ ok: true, show_score: showScore, show_answers: showAnswers, allow_pdf_download: allowPdfDownload });
 });
 
 app.post('/api/admin/exams/:id/shorten', requireAdmin, async (c) => {
@@ -600,6 +606,7 @@ app.get('/api/attempts/:token', async (c) => {
     id: attempt.id,exam_id: attempt.exam_id,exam_title: attempt.exam_title,student_name: attempt.student_name,
     roll_number: attempt.roll_number,email: attempt.email,address: attempt.address,status: attempt.status,started_at: attempt.started_at,
     deadline: deadline.toISOString(),remaining_seconds: Math.max(0,Math.floor((deadline.getTime()-Date.now())/1000)),
+    allow_pdf_download: Boolean(attempt.allow_pdf_download),
     questions,answers,result: await safeResult(c.env.DB,attempt,true),
   });
 });

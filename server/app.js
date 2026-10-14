@@ -35,7 +35,7 @@ const questionInsert = db.prepare(`INSERT INTO questions
   VALUES (@question_text, @option_a, @option_b, @option_c, @option_d, @correct_option, @category, @difficulty, @explanation)`);
 const questionById = db.prepare('SELECT * FROM questions WHERE archived=0 AND id = ?');
 const lockedQuestion = db.prepare('SELECT 1 FROM exam_questions WHERE question_id = ? LIMIT 1');
-const attemptByToken = db.prepare(`SELECT a.*, e.title AS exam_title, e.duration_minutes, e.show_score, e.show_answers
+const attemptByToken = db.prepare(`SELECT a.*, e.title AS exam_title, e.duration_minutes, e.show_score, e.show_answers, e.allow_pdf_download
   FROM attempts a JOIN exams e ON e.id = a.exam_id WHERE a.access_token = ?`);
 
 function apiError(res, status, error, details) {
@@ -134,9 +134,13 @@ function enforceDeadline(attempt) {
 
 function safeResult(attempt, detailed) {
   if (!attempt || attempt.status === 'in_progress') return null;
-  const result = { status: attempt.status, submittedAt: attempt.submitted_at };
-  if (attempt.show_score) result.score = attempt.score;
-  if (detailed && attempt.show_answers && attempt.show_score) {
+  const result = {
+    status: attempt.status,
+    submittedAt: attempt.submitted_at,
+    allow_pdf_download: Boolean(attempt.allow_pdf_download),
+  };
+  if (attempt.show_score || attempt.allow_pdf_download) result.score = attempt.score;
+  if (detailed && ((attempt.show_answers && attempt.show_score) || attempt.allow_pdf_download)) {
     result.answers = db.prepare(`SELECT q.id AS question_id, q.question_text, q.option_a, q.option_b, q.option_c, q.option_d,
         q.correct_option, q.explanation, eq.marks, a.selected_option, a.is_correct, a.marks_awarded
       FROM exam_questions eq JOIN questions q ON q.id = eq.question_id
@@ -423,6 +427,7 @@ app.post('/api/admin/exams', requireAdmin, (req, res) => {
   const status = ['draft', 'published', 'closed'].includes(req.body?.status) ? req.body.status : 'draft';
   const showScore = req.body?.show_score ? 1 : 0;
   const showAnswers = req.body?.show_answers ? 1 : 0;
+  const allowPdfDownload = req.body?.allow_pdf_download ? 1 : 0;
   const ids = Array.isArray(req.body?.question_ids) ? [...new Set(req.body.question_ids.map(Number).filter(Number.isSafeInteger))] : [];
   if (!title) return apiError(res, 400, 'Exam title is required.');
   if (![0, 1, 0.25, 0.5].includes(negativeMark)) return apiError(res, 400, 'Choose a negative mark of 0, 1, 0.25 or 0.50.');
@@ -435,8 +440,8 @@ app.post('/api/admin/exams', requireAdmin, (req, res) => {
   const subject = subjectInput || distinctCategories.join(', ') || 'General';
   if (!subject) return apiError(res, 400, 'Subject is required.');
   const examId = db.transaction(() => {
-    const created = db.prepare(`INSERT INTO exams (title, description, duration_minutes, status, show_score, show_answers, subject, negative_mark)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(title, description, duration, status, showScore, showAnswers, subject, negativeMark);
+    const created = db.prepare(`INSERT INTO exams (title, description, duration_minutes, status, show_score, show_answers, allow_pdf_download, subject, negative_mark)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(title, description, duration, status, showScore, showAnswers, allowPdfDownload, subject, negativeMark);
     const addQuestion = db.prepare('INSERT INTO exam_questions (exam_id, question_id, marks, sort_order) VALUES (?, ?, 1, ?)');
     ids.forEach((questionId, index) => addQuestion.run(created.lastInsertRowid, questionId, index));
     return created.lastInsertRowid;
@@ -470,13 +475,14 @@ app.patch('/api/admin/exams/:id/status', requireAdmin, (req, res) => {
 });
 
 app.patch('/api/admin/exams/:id/settings', requireAdmin, (req, res) => {
-  const exam = db.prepare('SELECT show_score, show_answers FROM exams WHERE id=?').get(Number(req.params.id));
+  const exam = db.prepare('SELECT show_score, show_answers, allow_pdf_download FROM exams WHERE id=?').get(Number(req.params.id));
   if (!exam) return apiError(res, 404, 'Exam not found.');
   const showScore = req.body?.show_score === undefined ? exam.show_score : Number(Boolean(req.body.show_score));
   const showAnswers = req.body?.show_answers === undefined ? exam.show_answers : Number(Boolean(req.body.show_answers));
+  const allowPdfDownload = req.body?.allow_pdf_download === undefined ? exam.allow_pdf_download : Number(Boolean(req.body.allow_pdf_download));
   if (showAnswers && !showScore) return apiError(res, 400, 'Show score must be enabled to show answer review.');
-  db.prepare('UPDATE exams SET show_score=?, show_answers=? WHERE id=?').run(showScore, showAnswers, Number(req.params.id));
-  res.json({ ok: true, show_score: showScore, show_answers: showAnswers });
+  db.prepare('UPDATE exams SET show_score=?, show_answers=?, allow_pdf_download=? WHERE id=?').run(showScore, showAnswers, allowPdfDownload, Number(req.params.id));
+  res.json({ ok: true, show_score: showScore, show_answers: showAnswers, allow_pdf_download: allowPdfDownload });
 });
 
 app.post('/api/admin/exams/:id/shorten', requireAdmin, async (req, res) => {
@@ -614,6 +620,7 @@ app.get('/api/attempts/:token', (req, res) => {
     student_name: attempt.student_name, roll_number: attempt.roll_number, email: attempt.email, address: attempt.address,
     status: attempt.status, started_at: attempt.started_at, deadline: deadline.toISOString(),
     remaining_seconds: Math.max(0, Math.ceil((deadline.getTime() - Date.now()) / 1000)),
+    allow_pdf_download: Boolean(attempt.allow_pdf_download),
     questions, answers,
     result: safeResult(attempt, true),
   });

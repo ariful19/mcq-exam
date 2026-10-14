@@ -5,6 +5,9 @@ export default defineConfig({
   build: {
     outDir: '../dist/client',
     emptyOutDir: true,
+    rollupOptions: {
+      external: [/^core-js/],
+    },
   },
   server: {
     proxy: {
