@@ -117,6 +117,10 @@ test('MCQ requirements work through the local API and persist in SQLite', { time
     assert.equal(response.data.question_type, 'mcq_single');
     assert.deepEqual(response.data.answer_key, { correct_option: 'A' });
     const manualId = response.data.id;
+    const viewedManual = await admin(`/api/admin/questions/${manualId}`);
+    assert.equal(viewedManual.status, 200);
+    assert.equal(viewedManual.data.id, manualId);
+    assert.equal(viewedManual.data.question_type, 'mcq_single');
 
     // Reject unsupported or malformed question types via API
     assert.equal((await admin('/api/admin/questions', {
@@ -360,6 +364,7 @@ test('Hosted backend preserves question history and exports and deletes data', a
     const replacement = await edit.json();
     assert.notEqual(replacement.id, old.id);
     assert.equal(sqlite.prepare('SELECT question_text FROM questions WHERE id=?').get(old.id).question_text, old.question_text);
+    assert.equal((await call(`/api/admin/questions/${replacement.id}`)).status, 200);
     assert.equal((await call(`/api/admin/questions/${replacement.id}`, 'DELETE')).status, 200);
     sqlite.prepare("INSERT INTO attempts (exam_id,access_token,student_name,roll_number,email,address,started_at,status) VALUES (?,'test-token','Student','1','a@b.com','Dhaka',CURRENT_TIMESTAMP,'submitted')").run(exam.id);
     const attemptId = Number(sqlite.prepare('SELECT id FROM attempts').get().id);

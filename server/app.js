@@ -40,7 +40,8 @@ app.use(session({
 const questionInsert = db.prepare(`INSERT INTO questions
   (question_text, question_type, option_a, option_b, option_c, option_d, correct_option, question_config, answer_key, media, category, difficulty, explanation)
   VALUES (@question_text, @question_type, @option_a, @option_b, @option_c, @option_d, @correct_option, @question_config, @answer_key, @media, @category, @difficulty, @explanation)`);
-const questionById = db.prepare('SELECT * FROM questions WHERE archived=0 AND id = ?');
+const questionById = db.prepare(`SELECT q.*, EXISTS(SELECT 1 FROM exam_questions eq WHERE eq.question_id = q.id) AS locked
+  FROM questions q WHERE q.archived=0 AND q.id = ?`);
 const lockedQuestion = db.prepare('SELECT 1 FROM exam_questions WHERE question_id = ? LIMIT 1');
 const attemptByToken = db.prepare(`SELECT a.*, e.title AS exam_title, e.duration_minutes, e.show_score, e.show_answers, e.allow_pdf_download
   FROM attempts a JOIN exams e ON e.id = a.exam_id WHERE a.access_token = ?`);
@@ -362,6 +363,14 @@ app.get('/api/admin/questions/template', requireAdmin, (_req, res) => {
   res.send(bytes);
 });
 
+app.get('/api/admin/questions/:id', requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isSafeInteger(id) || id < 1) return apiError(res, 404, 'Question not found.');
+  const found = questionById.get(id);
+  if (!found) return apiError(res, 404, 'Question not found.');
+  res.json(hydrateQuestionRow(found));
+});
+
 app.post('/api/admin/questions/import', requireAdmin, upload.single('file'), (req, res) => {
   if (!req.file) return apiError(res, 400, 'Choose an Excel workbook to import.');
   let rows;
@@ -374,8 +383,11 @@ app.post('/api/admin/questions/import', requireAdmin, upload.single('file'), (re
   }
   if (!rows?.length) return apiError(res, 400, 'The workbook is empty.');
   const headers = rows[0].map((value) => String(value).trim().toLowerCase());
-  const requiredHeaders = templateHeaders.slice(0, 6);
   const headerIndexes = new Map(headers.map((header, index) => [header, index]));
+  const hasExtensibleHeaders = headerIndexes.has('question') && (
+    headerIndexes.has('question type') || headerIndexes.has('question config') || headerIndexes.has('answer key')
+  );
+  const requiredHeaders = hasExtensibleHeaders ? ['Question'] : templateHeaders.slice(0, 6);
   const missing = requiredHeaders.filter((header) => !headerIndexes.has(header.toLowerCase()));
   if (missing.length) return apiError(res, 400, `Missing required columns: ${missing.join(', ')}.`);
 

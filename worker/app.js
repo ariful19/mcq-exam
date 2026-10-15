@@ -341,7 +341,8 @@ app.post('/api/admin/questions', requireAdmin, async (c) => {
     question.difficulty,
     question.explanation,
   ).run();
-  const created = await c.env.DB.prepare('SELECT * FROM questions WHERE id=?').bind(result.meta.last_row_id).first();
+  const created = await c.env.DB.prepare(`SELECT q.*, EXISTS(SELECT 1 FROM exam_questions eq WHERE eq.question_id=q.id) AS locked
+    FROM questions q WHERE q.id=?`).bind(result.meta.last_row_id).first();
   return c.json(hydrateQuestionRow(created), 201);
 });
 
@@ -397,7 +398,8 @@ app.put('/api/admin/questions/:id', requireAdmin, async (c) => {
       ),
       c.env.DB.prepare('UPDATE questions SET archived=1 WHERE id=?').bind(id),
     ]);
-    const replacement = await c.env.DB.prepare('SELECT * FROM questions WHERE id=?').bind(results[0].meta.last_row_id).first();
+    const replacement = await c.env.DB.prepare(`SELECT q.*, EXISTS(SELECT 1 FROM exam_questions eq WHERE eq.question_id=q.id) AS locked
+      FROM questions q WHERE q.id=?`).bind(results[0].meta.last_row_id).first();
     return c.json(hydrateQuestionRow(replacement));
   }
   await c.env.DB.prepare(`UPDATE questions SET question_text=?,question_type=?,option_a=?,option_b=?,option_c=?,option_d=?,correct_option=?,question_config=?,answer_key=?,media=?,category=?,difficulty=?,explanation=? WHERE id=?`)
@@ -417,7 +419,8 @@ app.put('/api/admin/questions/:id', requireAdmin, async (c) => {
       question.explanation,
       id,
     ).run();
-  const updated = await c.env.DB.prepare('SELECT * FROM questions WHERE id=?').bind(id).first();
+  const updated = await c.env.DB.prepare(`SELECT q.*, EXISTS(SELECT 1 FROM exam_questions eq WHERE eq.question_id=q.id) AS locked
+    FROM questions q WHERE q.id=?`).bind(id).first();
   return c.json(hydrateQuestionRow(updated));
 });
 
@@ -440,6 +443,16 @@ app.get('/api/admin/questions/template', requireAdmin, (c) => {
   } });
 });
 
+app.get('/api/admin/questions/:id', requireAdmin, async (c) => {
+  await ensureSeeded(c.env.DB);
+  const id = Number(c.req.param('id'));
+  if (!Number.isSafeInteger(id) || id < 1) return apiError(c, 404, 'Question not found.');
+  const found = await c.env.DB.prepare(`SELECT q.*, EXISTS(SELECT 1 FROM exam_questions eq WHERE eq.question_id=q.id) AS locked
+    FROM questions q WHERE q.archived=0 AND q.id=?`).bind(id).first();
+  if (!found) return apiError(c, 404, 'Question not found.');
+  return c.json(hydrateQuestionRow(found));
+});
+
 app.post('/api/admin/questions/import', requireAdmin, async (c) => {
   let file;
   let uploadSubject = '';
@@ -457,7 +470,11 @@ app.post('/api/admin/questions/import', requireAdmin, async (c) => {
   } catch { return apiError(c, 400, 'This file could not be read as an Excel workbook.'); }
   if (!rows?.length) return apiError(c, 400, 'The workbook is empty.');
   const headerIndexes = new Map(rows[0].map((value, index) => [String(value).trim().toLowerCase(), index]));
-  const missing = templateHeaders.slice(0, 6).filter((header) => !headerIndexes.has(header.toLowerCase()));
+  const hasExtensibleHeaders = headerIndexes.has('question') && (
+    headerIndexes.has('question type') || headerIndexes.has('question config') || headerIndexes.has('answer key')
+  );
+  const requiredHeaders = hasExtensibleHeaders ? ['Question'] : templateHeaders.slice(0, 6);
+  const missing = requiredHeaders.filter((header) => !headerIndexes.has(header.toLowerCase()));
   if (missing.length) return apiError(c, 400, `Missing required columns: ${missing.join(', ')}.`);
   const imported = [];
   const errors = [];

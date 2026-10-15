@@ -13,6 +13,51 @@ export const DEFAULT_QUESTION_TYPE = QUESTION_TYPES.MCQ_SINGLE;
 export const ALLOWED_MEDIA_TYPES = Object.freeze(['image', 'audio']);
 export const LEGACY_MCQ_LETTERS = Object.freeze(['A', 'B', 'C', 'D']);
 
+export const QUESTION_TYPE_META = Object.freeze({
+  [QUESTION_TYPES.MCQ_SINGLE]: Object.freeze({
+    id: QUESTION_TYPES.MCQ_SINGLE,
+    label: 'Single-choice MCQ (A–D)',
+    shortLabel: 'Single MCQ',
+    description: 'Four options (A, B, C, D) with one correct answer.',
+  }),
+  [QUESTION_TYPES.MCQ_MULTI]: Object.freeze({
+    id: QUESTION_TYPES.MCQ_MULTI,
+    label: 'Multiple-select MCQ',
+    shortLabel: 'Multi-select',
+    description: 'Two to eight options with one or more correct answers.',
+  }),
+  [QUESTION_TYPES.TRUE_FALSE]: Object.freeze({
+    id: QUESTION_TYPES.TRUE_FALSE,
+    label: 'True / False',
+    shortLabel: 'True / False',
+    description: 'Statement where either True or False is the correct answer.',
+  }),
+  [QUESTION_TYPES.SHORT_ANSWER]: Object.freeze({
+    id: QUESTION_TYPES.SHORT_ANSWER,
+    label: 'Short answer',
+    shortLabel: 'Short answer',
+    description: 'Deterministic text match against accepted answers (no AI/NLP).',
+  }),
+  [QUESTION_TYPES.NUMERIC]: Object.freeze({
+    id: QUESTION_TYPES.NUMERIC,
+    label: 'Numeric',
+    shortLabel: 'Numeric',
+    description: 'Exact numeric value with optional tolerance and unit.',
+  }),
+  [QUESTION_TYPES.MATCHING]: Object.freeze({
+    id: QUESTION_TYPES.MATCHING,
+    label: 'Matching pairs',
+    shortLabel: 'Matching',
+    description: 'Match each prompt to its corresponding choice.',
+  }),
+  [QUESTION_TYPES.ORDERING]: Object.freeze({
+    id: QUESTION_TYPES.ORDERING,
+    label: 'Ordering sequence',
+    shortLabel: 'Ordering',
+    description: 'Arrange items into the correct sequential order.',
+  }),
+});
+
 function isPlainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
@@ -266,19 +311,25 @@ export function normalizeQuestion(input = {}) {
   } else if (questionType === QUESTION_TYPES.MCQ_MULTI) {
     let rawOptions = configInput.options;
     if (rawOptions === undefined && (optionA || optionB || optionC || optionD)) {
-      rawOptions = [
+      const legacyCandidates = [
         { id: 'A', text: optionA },
         { id: 'B', text: optionB },
         { id: 'C', text: optionC },
         { id: 'D', text: optionD },
       ];
+      const populated = legacyCandidates.filter((opt) => opt.text);
+      rawOptions = populated.length >= 2 ? populated : legacyCandidates;
     }
     const { options, errors: optErrors } = validateOptionsList(rawOptions, { minCount: 2, maxCount: 8 });
     errors.push(...optErrors);
 
-    const rawCorrectOptions = answerKeyInput.correct_options ?? input.correct_options;
+    let rawCorrectOptions = answerKeyInput.correct_options ?? input.correct_options;
+    if (rawCorrectOptions === undefined && correctOption) {
+      const parsedFromCorrect = correctOption.split(/[,;\s]+/).map((s) => s.trim().toUpperCase()).filter(Boolean);
+      if (parsedFromCorrect.length > 0) rawCorrectOptions = parsedFromCorrect;
+    }
     const optionIdSet = new Set(options.map((opt) => opt.id));
-    let correctOptions = [];
+    const correctOptions = [];
     if (!Array.isArray(rawCorrectOptions) || rawCorrectOptions.length < 1) {
       errors.push('mcq_multi requires answer_key.correct_options as a non-empty array of option IDs.');
     } else {
@@ -296,8 +347,12 @@ export function normalizeQuestion(input = {}) {
       });
     }
 
-    const minSelections = configInput.min_selections !== undefined ? Number(configInput.min_selections) : undefined;
-    const maxSelections = configInput.max_selections !== undefined ? Number(configInput.max_selections) : undefined;
+    const minSelections = configInput.min_selections !== undefined && configInput.min_selections !== '' && configInput.min_selections !== null
+      ? Number(configInput.min_selections)
+      : undefined;
+    const maxSelections = configInput.max_selections !== undefined && configInput.max_selections !== '' && configInput.max_selections !== null
+      ? Number(configInput.max_selections)
+      : undefined;
     if (minSelections !== undefined && (!Number.isInteger(minSelections) || minSelections < 1 || minSelections > options.length)) {
       errors.push('min_selections must be an integer between 1 and the number of options.');
     }
@@ -336,7 +391,11 @@ export function normalizeQuestion(input = {}) {
       if (!optErrors.length) options = validatedOpts;
     }
 
-    const rawCorrect = answerKeyInput.correct_answer !== undefined ? answerKeyInput.correct_answer : input.correct_answer;
+    let rawCorrect = answerKeyInput.correct_answer !== undefined ? answerKeyInput.correct_answer : input.correct_answer;
+    if (rawCorrect === undefined) {
+      const fallbackTf = String(input.correct_option ?? input['Correct Answer'] ?? '').trim();
+      if (fallbackTf) rawCorrect = fallbackTf;
+    }
     let boolAnswer = null;
     if (typeof rawCorrect === 'boolean') {
       boolAnswer = rawCorrect;
@@ -357,7 +416,13 @@ export function normalizeQuestion(input = {}) {
     normalizedConfig = { options };
     normalizedAnswerKey = { correct_answer: boolAnswer };
   } else if (questionType === QUESTION_TYPES.SHORT_ANSWER) {
-    const rawAccepted = answerKeyInput.accepted_answers ?? input.accepted_answers;
+    let rawAccepted = answerKeyInput.accepted_answers ?? input.accepted_answers;
+    if (rawAccepted === undefined) {
+      const fallbackAccepted = String(input.correct_option ?? input['Correct Answer'] ?? '').trim();
+      if (fallbackAccepted) {
+        rawAccepted = fallbackAccepted.split('|').map((s) => s.trim()).filter(Boolean);
+      }
+    }
     const acceptedAnswers = [];
     if (!Array.isArray(rawAccepted) || rawAccepted.length === 0 || rawAccepted.length > 25) {
       errors.push('short_answer requires answer_key.accepted_answers as a non-empty array of accepted strings.');
@@ -371,7 +436,9 @@ export function normalizeQuestion(input = {}) {
       }
     }
     const caseSensitive = Boolean(answerKeyInput.case_sensitive ?? configInput.case_sensitive ?? false);
-    const maxLength = configInput.max_length !== undefined ? Number(configInput.max_length) : 200;
+    const maxLength = configInput.max_length !== undefined && configInput.max_length !== '' && configInput.max_length !== null
+      ? Number(configInput.max_length)
+      : 200;
     if (!Number.isInteger(maxLength) || maxLength < 1 || maxLength > 500) {
       errors.push('short_answer question_config.max_length must be an integer between 1 and 500.');
     }
@@ -392,12 +459,18 @@ export function normalizeQuestion(input = {}) {
       case_sensitive: caseSensitive,
     };
   } else if (questionType === QUESTION_TYPES.NUMERIC) {
-    const rawVal = answerKeyInput.value !== undefined ? answerKeyInput.value : input.correct_value;
+    let rawVal = answerKeyInput.value !== undefined ? answerKeyInput.value : input.correct_value;
+    if (rawVal === undefined) {
+      const fallbackNum = String(input.correct_option ?? input['Correct Answer'] ?? '').trim();
+      if (fallbackNum !== '') rawVal = fallbackNum;
+    }
     const numericVal = typeof rawVal === 'number' ? rawVal : (typeof rawVal === 'string' && rawVal.trim() !== '' ? Number(rawVal) : NaN);
     if (!Number.isFinite(numericVal)) {
       errors.push('numeric requires a finite number in answer_key.value.');
     }
-    const rawTolerance = answerKeyInput.tolerance !== undefined ? answerKeyInput.tolerance : 0;
+    const rawTolerance = answerKeyInput.tolerance !== undefined && answerKeyInput.tolerance !== '' && answerKeyInput.tolerance !== null
+      ? answerKeyInput.tolerance
+      : 0;
     const tolerance = typeof rawTolerance === 'number' ? rawTolerance : (typeof rawTolerance === 'string' && rawTolerance.trim() !== '' ? Number(rawTolerance) : NaN);
     if (!Number.isFinite(tolerance) || tolerance < 0) {
       errors.push('numeric answer_key.tolerance must be a non-negative finite number.');

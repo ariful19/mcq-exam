@@ -1,4 +1,10 @@
 import { jsPDF } from 'jspdf';
+import {
+  QUESTION_TYPES,
+  isAnswerProvided,
+  formatStudentAnswerSummary,
+  formatCorrectAnswerSummary,
+} from './question-authoring.js';
 
 const optionKeys = { A: 'option_a', B: 'option_b', C: 'option_c', D: 'option_d' };
 
@@ -59,7 +65,7 @@ export function generateResultPdf({ attempt, result, settings = {} }) {
   const status = cleanText((result.status || attempt.status || 'submitted').replace('_', ' ').toUpperCase());
 
   const correctCount = answers.filter((a) => a.is_correct).length;
-  const answeredCount = answers.filter((a) => a.selected_option).length;
+  const answeredCount = answers.filter((a) => isAnswerProvided(a, a.selected_option, a.answer_data)).length;
   const incorrectCount = answeredCount - correctCount;
   const unansweredCount = answers.length - answeredCount;
 
@@ -269,8 +275,9 @@ export function generateResultPdf({ attempt, result, settings = {} }) {
 
   // Questions Loop
   answers.forEach((q, index) => {
+    const qType = q.question_type || QUESTION_TYPES.MCQ_SINGLE;
     const isCorrect = Boolean(q.is_correct);
-    const isAnswered = Boolean(q.selected_option);
+    const isAnswered = isAnswerProvided(q, q.selected_option, q.answer_data);
 
     const statusText = isCorrect
       ? 'CORRECT (+1.00)'
@@ -297,23 +304,36 @@ export function generateResultPdf({ attempt, result, settings = {} }) {
     const optColWidth = (contentWidth - 8) / 2;
     const optLabels = {};
     const optHeights = {};
+    let row1Height = 0;
+    let row2Height = 0;
+    let nonMcqStudentLines = [];
+    let nonMcqCorrectLines = [];
 
-    ['A', 'B', 'C', 'D'].forEach((letter) => {
-      const isSelected = q.selected_option === letter;
-      const isRight = q.correct_option === letter;
-      let tag = '';
-      if (isRight && isSelected) tag = ' [Correct] [Your Answer]';
-      else if (isRight) tag = ' [Correct]';
-      else if (isSelected) tag = ' [Your Answer]';
+    if (qType === QUESTION_TYPES.MCQ_SINGLE) {
+      ['A', 'B', 'C', 'D'].forEach((letter) => {
+        const isSelected = q.selected_option === letter;
+        const isRight = q.correct_option === letter;
+        let tag = '';
+        if (isRight && isSelected) tag = ' [Correct] [Your Answer]';
+        else if (isRight) tag = ' [Correct]';
+        else if (isSelected) tag = ' [Your Answer]';
 
-      const optText = `${letter}. ${cleanText(q[optionKeys[letter]] || '')}${tag}`;
-      const lines = doc.splitTextToSize(optText, optColWidth - 4);
-      optLabels[letter] = lines;
-      optHeights[letter] = lines.length * 3.8;
-    });
+        const optText = `${letter}. ${cleanText(q[optionKeys[letter]] || '')}${tag}`;
+        const lines = doc.splitTextToSize(optText, optColWidth - 4);
+        optLabels[letter] = lines;
+        optHeights[letter] = lines.length * 3.8;
+      });
+      row1Height = Math.max(optHeights.A, optHeights.B);
+      row2Height = Math.max(optHeights.C, optHeights.D);
+    } else {
+      const studentAnsText = `Your Answer: ${cleanText(formatStudentAnswerSummary(q))}`;
+      const correctAnsText = `Correct Answer: ${cleanText(formatCorrectAnswerSummary(q))}`;
+      nonMcqStudentLines = doc.splitTextToSize(studentAnsText, contentWidth - 10);
+      nonMcqCorrectLines = doc.splitTextToSize(correctAnsText, contentWidth - 10);
+      row1Height = nonMcqStudentLines.length * 3.8;
+      row2Height = nonMcqCorrectLines.length * 3.8;
+    }
 
-    const row1Height = Math.max(optHeights.A, optHeights.B);
-    const row2Height = Math.max(optHeights.C, optHeights.D);
     const optsTotalHeight = row1Height + row2Height + 4;
 
     let expHeight = 0;
@@ -378,35 +398,50 @@ export function generateResultPdf({ attempt, result, settings = {} }) {
 
     let curY = y + cardPaddingTop + qTextHeight + 2;
 
-    // Render Options (2 columns)
-    const optX1 = margin + 4;
-    const optX2 = margin + halfWidth + 1;
+    if (qType === QUESTION_TYPES.MCQ_SINGLE) {
+      // Render Options (2 columns)
+      const optX1 = margin + 4;
+      const optX2 = margin + halfWidth + 1;
 
-    const printOption = (letter, x, optY) => {
-      const isSelected = q.selected_option === letter;
-      const isRight = q.correct_option === letter;
+      const printOption = (letter, x, optY) => {
+        const isSelected = q.selected_option === letter;
+        const isRight = q.correct_option === letter;
 
-      if (isRight) {
-        doc.setFont('helvetica', 'bold');
-        doc.setTextColor(21, 128, 61); // Green 700
-      } else if (isSelected) {
-        doc.setFont('helvetica', 'bold');
-        doc.setTextColor(185, 28, 28); // Red 700
-      } else {
-        doc.setFont('helvetica', 'normal');
-        doc.setTextColor(71, 85, 105); // Slate 600
-      }
+        if (isRight) {
+          doc.setFont('helvetica', 'bold');
+          doc.setTextColor(21, 128, 61); // Green 700
+        } else if (isSelected) {
+          doc.setFont('helvetica', 'bold');
+          doc.setTextColor(185, 28, 28); // Red 700
+        } else {
+          doc.setFont('helvetica', 'normal');
+          doc.setTextColor(71, 85, 105); // Slate 600
+        }
+        doc.setFontSize(8);
+        doc.text(optLabels[letter], x, optY);
+      };
+
+      printOption('A', optX1, curY);
+      printOption('B', optX2, curY);
+      curY += row1Height + 1.5;
+
+      printOption('C', optX1, curY);
+      printOption('D', optX2, curY);
+      curY += row2Height + 2.5;
+    } else {
+      doc.setFont('helvetica', 'bold');
       doc.setFontSize(8);
-      doc.text(optLabels[letter], x, optY);
-    };
+      if (isCorrect) doc.setTextColor(21, 128, 61);
+      else if (isAnswered) doc.setTextColor(185, 28, 28);
+      else doc.setTextColor(71, 85, 105);
+      doc.text(nonMcqStudentLines, margin + 4, curY);
+      curY += row1Height + 1.5;
 
-    printOption('A', optX1, curY);
-    printOption('B', optX2, curY);
-    curY += row1Height + 1.5;
-
-    printOption('C', optX1, curY);
-    printOption('D', optX2, curY);
-    curY += row2Height + 2.5;
+      doc.setFont('helvetica', 'bold');
+      doc.setTextColor(21, 128, 61);
+      doc.text(nonMcqCorrectLines, margin + 4, curY);
+      curY += row2Height + 2.5;
+    }
 
     // Explanation Box
     if (expLines.length) {
