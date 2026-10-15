@@ -10,6 +10,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { db, databasePath } from './db.js';
 import { shortenWithIsgd } from './isgd.js';
+import {
+  normalizeQuestion,
+  hydrateQuestionRow,
+  hydrateAnswerRow,
+  validateStudentAnswer,
+  evaluateQuestionAnswer,
+} from './question-types.js';
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
@@ -31,8 +38,8 @@ app.use(session({
 }));
 
 const questionInsert = db.prepare(`INSERT INTO questions
-  (question_text, option_a, option_b, option_c, option_d, correct_option, category, difficulty, explanation)
-  VALUES (@question_text, @option_a, @option_b, @option_c, @option_d, @correct_option, @category, @difficulty, @explanation)`);
+  (question_text, question_type, option_a, option_b, option_c, option_d, correct_option, question_config, answer_key, media, category, difficulty, explanation)
+  VALUES (@question_text, @question_type, @option_a, @option_b, @option_c, @option_d, @correct_option, @question_config, @answer_key, @media, @category, @difficulty, @explanation)`);
 const questionById = db.prepare('SELECT * FROM questions WHERE archived=0 AND id = ?');
 const lockedQuestion = db.prepare('SELECT 1 FROM exam_questions WHERE question_id = ? LIMIT 1');
 const attemptByToken = db.prepare(`SELECT a.*, e.title AS exam_title, e.duration_minutes, e.show_score, e.show_answers, e.allow_pdf_download
@@ -71,28 +78,12 @@ function requireAdmin(req, res, next) {
 }
 
 function normalizedQuestion(input) {
-  const q = {
-    question_text: String(input.question_text ?? input.Question ?? '').trim(),
-    option_a: String(input.option_a ?? input['Option A'] ?? '').trim(),
-    option_b: String(input.option_b ?? input['Option B'] ?? '').trim(),
-    option_c: String(input.option_c ?? input['Option C'] ?? '').trim(),
-    option_d: String(input.option_d ?? input['Option D'] ?? '').trim(),
-    correct_option: String(input.correct_option ?? input['Correct Answer'] ?? '').trim().toUpperCase(),
-    category: String(input.category ?? input.subject ?? input.Category ?? '').trim(),
-    difficulty: String(input.difficulty ?? input.Difficulty ?? '').trim(),
-    explanation: String(input.explanation ?? input.Explanation ?? '').trim(),
-  };
-  const errors = [];
-  if (!q.question_text) errors.push('Question is required.');
-  for (const letter of ['a', 'b', 'c', 'd']) if (!q[`option_${letter}`]) errors.push(`Option ${letter.toUpperCase()} is required.`);
-  if (!['A', 'B', 'C', 'D'].includes(q.correct_option)) errors.push('Correct answer must be A, B, C or D.');
-  if (!q.category) errors.push('Subject is required.');
-  return { question: q, errors };
+  return normalizeQuestion(input);
 }
 
 function examQuestions(examId) {
-  return db.prepare(`SELECT q.id, q.question_text, q.option_a, q.option_b, q.option_c, q.option_d,
-      q.correct_option, q.explanation, eq.marks, eq.sort_order
+  return db.prepare(`SELECT q.id, q.question_text, q.question_type, q.option_a, q.option_b, q.option_c, q.option_d,
+      q.correct_option, q.question_config, q.answer_key, q.media, q.explanation, q.category, eq.marks, eq.sort_order
     FROM exam_questions eq JOIN questions q ON q.id = eq.question_id
     WHERE eq.exam_id = ? ORDER BY eq.sort_order, eq.id`).all(examId);
 }
@@ -113,10 +104,9 @@ function finalizeAttempt(attemptId, status) {
     let score = 0;
     for (const question of questions) {
       const answer = byQuestion.get(question.id);
-      const correct = Boolean(answer?.selected_option && answer.selected_option === question.correct_option);
-      const marks = correct ? question.marks : answer?.selected_option ? -negativeMark : 0;
-      score += marks;
-      if (answer) update.run(correct ? 1 : 0, marks, answer.id);
+      const { isCorrect, marksAwarded } = evaluateQuestionAnswer(question, answer, negativeMark);
+      score += marksAwarded;
+      if (answer) update.run(isCorrect ? 1 : 0, marksAwarded, answer.id);
     }
     db.prepare(`UPDATE attempts SET status = ?, submitted_at = CURRENT_TIMESTAMP, score = ?
       WHERE id = ? AND status = 'in_progress'`).run(status, score, attemptId);
@@ -141,11 +131,11 @@ function safeResult(attempt, detailed) {
   };
   if (attempt.show_score || attempt.allow_pdf_download) result.score = attempt.score;
   if (detailed && ((attempt.show_answers && attempt.show_score) || attempt.allow_pdf_download)) {
-    result.answers = db.prepare(`SELECT q.id AS question_id, q.question_text, q.option_a, q.option_b, q.option_c, q.option_d,
-        q.correct_option, q.explanation, eq.marks, a.selected_option, a.is_correct, a.marks_awarded
+    result.answers = db.prepare(`SELECT q.id AS question_id, q.question_text, q.question_type, q.option_a, q.option_b, q.option_c, q.option_d,
+        q.correct_option, q.question_config, q.answer_key, q.media, q.explanation, eq.marks, a.selected_option, a.answer_data, a.is_correct, a.marks_awarded
       FROM exam_questions eq JOIN questions q ON q.id = eq.question_id
       LEFT JOIN answers a ON a.question_id = q.id AND a.attempt_id = ?
-      WHERE eq.exam_id = ? ORDER BY eq.sort_order, eq.id`).all(attempt.id, attempt.exam_id);
+      WHERE eq.exam_id = ? ORDER BY eq.sort_order, eq.id`).all(attempt.id, attempt.exam_id).map((row) => hydrateAnswerRow(row));
   }
   return result;
 }
@@ -263,7 +253,7 @@ app.get('/api/admin/backup', requireAdmin, (_req, res) => {
 
 app.get('/api/admin/questions', requireAdmin, (_req, res) => {
   const questions = db.prepare(`SELECT q.*, EXISTS(SELECT 1 FROM exam_questions eq WHERE eq.question_id = q.id) AS locked
-    FROM questions q WHERE q.archived=0 ORDER BY q.id DESC`).all();
+    FROM questions q WHERE q.archived=0 ORDER BY q.id DESC`).all().map((row) => hydrateQuestionRow(row));
   res.json(questions);
 });
 
@@ -271,7 +261,7 @@ app.post('/api/admin/questions', requireAdmin, (req, res) => {
   const { question, errors } = normalizedQuestion(req.body || {});
   if (errors.length) return apiError(res, 400, 'Please correct the question details.', errors);
   const result = questionInsert.run(question);
-  res.status(201).json(questionById.get(result.lastInsertRowid));
+  res.status(201).json(hydrateQuestionRow(questionById.get(result.lastInsertRowid)));
 });
 
 function parseQuestionPaste(text, subject) {
@@ -341,15 +331,15 @@ app.put('/api/admin/questions/:id', requireAdmin, (req, res) => {
     const replacement = db.transaction(() => {
       const result = questionInsert.run(question);
       db.prepare('UPDATE questions SET archived=1 WHERE id=?').run(id);
-      return questionById.get(result.lastInsertRowid);
+      return hydrateQuestionRow(questionById.get(result.lastInsertRowid));
     })();
     return res.json(replacement);
   }
-  db.prepare(`UPDATE questions SET question_text=@question_text, option_a=@option_a, option_b=@option_b,
-    option_c=@option_c, option_d=@option_d, correct_option=@correct_option, category=@category, difficulty=@difficulty,
-    explanation=@explanation
+  db.prepare(`UPDATE questions SET question_text=@question_text, question_type=@question_type, option_a=@option_a, option_b=@option_b,
+    option_c=@option_c, option_d=@option_d, correct_option=@correct_option, question_config=@question_config, answer_key=@answer_key,
+    media=@media, category=@category, difficulty=@difficulty, explanation=@explanation
     WHERE id=@id`).run({ ...question, id });
-  res.json(questionById.get(id));
+  res.json(hydrateQuestionRow(questionById.get(id)));
 });
 
 app.delete('/api/admin/questions/:id', requireAdmin, (req, res) => {
@@ -360,6 +350,7 @@ app.delete('/api/admin/questions/:id', requireAdmin, (req, res) => {
 });
 
 const templateHeaders = ['Question', 'Option A', 'Option B', 'Option C', 'Option D', 'Correct Answer', 'Category', 'Difficulty', 'Explanation'];
+const optionalImportHeaders = ['Question Type', 'Question Config', 'Answer Key', 'Media'];
 app.get('/api/admin/questions/template', requireAdmin, (_req, res) => {
   const book = XLSX.utils.book_new();
   const sheet = XLSX.utils.aoa_to_sheet([templateHeaders]);
@@ -391,10 +382,11 @@ app.post('/api/admin/questions/import', requireAdmin, upload.single('file'), (re
   const imported = [];
   const errors = [];
   const fallbackSubject = String(req.body?.subject ?? '').trim();
+  const allRecognizedHeaders = [...templateHeaders, ...optionalImportHeaders];
   for (let index = 1; index < rows.length; index += 1) {
     const cells = rows[index];
     if (cells.every((cell) => String(cell ?? '').trim() === '')) continue;
-    const input = Object.fromEntries(templateHeaders.map((header) => {
+    const input = Object.fromEntries(allRecognizedHeaders.map((header) => {
       const column = headerIndexes.get(header.toLowerCase());
       return [header, column === undefined ? '' : cells[column] ?? ''];
     }));
@@ -419,6 +411,9 @@ app.get('/api/admin/exams', requireAdmin, (_req, res) => {
 });
 
 app.post('/api/admin/exams', requireAdmin, (req, res) => {
+  if (req.body?.mandatory_sections || req.body?.require_sections) {
+    return apiError(res, 400, 'Mandatory exam sections are not supported.');
+  }
   const title = String(req.body?.title || '').trim();
   const description = String(req.body?.description || '').trim();
   const subjectInput = String(req.body?.subject ?? '').trim();
@@ -557,7 +552,7 @@ app.post('/api/admin/shorten', requireAdmin, async (req, res) => {
 });
 
 app.get('/api/admin/exams/:id/questions', requireAdmin, (req, res) => {
-  const questions = examQuestions(Number(req.params.id));
+  const questions = examQuestions(Number(req.params.id)).map((row) => hydrateQuestionRow(row));
   if (!questions.length) return apiError(res, 404, 'Exam not found or it has no questions.');
   res.json(questions);
 });
@@ -573,11 +568,11 @@ app.get('/api/admin/attempts/:id', requireAdmin, (req, res) => {
   const attempt = db.prepare(`SELECT a.*, e.title AS exam_title FROM attempts a
     JOIN exams e ON e.id=a.exam_id WHERE a.id=?`).get(Number(req.params.id));
   if (!attempt) return apiError(res, 404, 'Attempt not found.');
-  const answers = db.prepare(`SELECT q.id AS question_id, q.question_text, q.option_a, q.option_b, q.option_c, q.option_d,
-      q.correct_option, q.explanation, eq.marks, a.selected_option, a.is_correct, a.marks_awarded
+  const answers = db.prepare(`SELECT q.id AS question_id, q.question_text, q.question_type, q.option_a, q.option_b, q.option_c, q.option_d,
+      q.correct_option, q.question_config, q.answer_key, q.media, q.explanation, eq.marks, a.selected_option, a.answer_data, a.is_correct, a.marks_awarded
     FROM exam_questions eq JOIN questions q ON q.id=eq.question_id
     LEFT JOIN answers a ON a.question_id=q.id AND a.attempt_id=?
-    WHERE eq.exam_id=? ORDER BY eq.sort_order, eq.id`).all(attempt.id, attempt.exam_id);
+    WHERE eq.exam_id=? ORDER BY eq.sort_order, eq.id`).all(attempt.id, attempt.exam_id).map((row) => hydrateAnswerRow(row));
   res.json({ ...attempt, answers });
 });
 
@@ -604,17 +599,10 @@ app.get('/api/attempts/:token', (req, res) => {
   let attempt = studentAttempt(token);
   if (!attempt) return apiError(res, 404, 'Attempt not found. Return to the exam list to start again.');
   const deadline = attemptDeadline(attempt);
-  const questions = examQuestions(attempt.exam_id).map((question) => ({
-    id: question.id,
-    question_text: question.question_text,
-    option_a: question.option_a,
-    option_b: question.option_b,
-    option_c: question.option_c,
-    option_d: question.option_d,
-    marks: question.marks,
-    sort_order: question.sort_order,
-  }));
-  const answers = db.prepare('SELECT question_id, selected_option FROM answers WHERE attempt_id=?').all(attempt.id);
+  const questions = examQuestions(attempt.exam_id).map((question) => hydrateQuestionRow(question, { includeAnswerKey: false }));
+  const answers = db.prepare('SELECT question_id, selected_option, answer_data FROM answers WHERE attempt_id=?')
+    .all(attempt.id)
+    .map((row) => hydrateAnswerRow(row, { forActiveAttempt: true }));
   res.json({
     id: attempt.id, exam_id: attempt.exam_id, exam_title: attempt.exam_title,
     student_name: attempt.student_name, roll_number: attempt.roll_number, email: attempt.email, address: attempt.address,
@@ -631,12 +619,20 @@ app.put('/api/attempts/:token/answers', (req, res) => {
   if (!attempt) return apiError(res, 404, 'Attempt not found.');
   if (attempt.status !== 'in_progress') return apiError(res, 409, 'This attempt has already been submitted.', { result: safeResult(attempt, true) });
   const questionId = Number(req.body?.question_id);
-  const selectedOption = req.body?.selected_option === null || req.body?.selected_option === '' ? null : String(req.body?.selected_option || '').toUpperCase();
-  if (!['A', 'B', 'C', 'D', null].includes(selectedOption)) return apiError(res, 400, 'Choose option A, B, C or D.');
-  if (!db.prepare('SELECT 1 FROM exam_questions WHERE exam_id=? AND question_id=?').get(attempt.exam_id, questionId)) return apiError(res, 400, 'That question is not part of this examination.');
-  db.prepare(`INSERT INTO answers (attempt_id, question_id, selected_option) VALUES (?, ?, ?)
-    ON CONFLICT(attempt_id, question_id) DO UPDATE SET selected_option=excluded.selected_option, is_correct=NULL, marks_awarded=0`)
-    .run(attempt.id, questionId, selectedOption);
+  const examQuestion = db.prepare(`SELECT q.* FROM exam_questions eq JOIN questions q ON q.id = eq.question_id WHERE eq.exam_id = ? AND eq.question_id = ?`)
+    .get(attempt.exam_id, questionId);
+  if (!examQuestion) {
+    if (req.body?.selected_option !== undefined && req.body?.answer_data === undefined) {
+      const selectedOption = req.body?.selected_option === null || req.body?.selected_option === '' ? null : String(req.body?.selected_option || '').toUpperCase();
+      if (!['A', 'B', 'C', 'D', null].includes(selectedOption)) return apiError(res, 400, 'Choose option A, B, C or D.');
+    }
+    return apiError(res, 400, 'That question is not part of this examination.');
+  }
+  const validated = validateStudentAnswer(examQuestion, req.body || {});
+  if (validated.error) return apiError(res, 400, validated.error);
+  db.prepare(`INSERT INTO answers (attempt_id, question_id, selected_option, answer_data) VALUES (?, ?, ?, ?)
+    ON CONFLICT(attempt_id, question_id) DO UPDATE SET selected_option=excluded.selected_option, answer_data=excluded.answer_data, is_correct=NULL, marks_awarded=0`)
+    .run(attempt.id, questionId, validated.selected_option, validated.answerDataJson);
   res.json({ ok: true });
 });
 

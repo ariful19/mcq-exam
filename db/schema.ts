@@ -1,20 +1,45 @@
 import { sql } from 'drizzle-orm';
 import { check, index, integer, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
+export const QUESTION_TYPE_VALUES = [
+  'mcq_single',
+  'mcq_multi',
+  'true_false',
+  'short_answer',
+  'numeric',
+  'matching',
+  'ordering',
+] as const;
+
 export const questions = sqliteTable('questions', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   archived: integer('archived').notNull().default(0),
   question_text: text('question_text').notNull(),
-  option_a: text('option_a').notNull(),
-  option_b: text('option_b').notNull(),
-  option_c: text('option_c').notNull(),
-  option_d: text('option_d').notNull(),
-  correct_option: text('correct_option').notNull(),
+  question_type: text('question_type').notNull().default('mcq_single'),
+  option_a: text('option_a').notNull().default(''),
+  option_b: text('option_b').notNull().default(''),
+  option_c: text('option_c').notNull().default(''),
+  option_d: text('option_d').notNull().default(''),
+  correct_option: text('correct_option').notNull().default(''),
+  question_config: text('question_config').notNull().default('{}'),
+  answer_key: text('answer_key').notNull().default('{}'),
+  media: text('media'),
   category: text('category').notNull().default(''),
   difficulty: text('difficulty').notNull().default(''),
   explanation: text('explanation').notNull().default(''),
   created_at: text('created_at').notNull().default(sql`CURRENT_TIMESTAMP`),
-}, (table) => [check('questions_correct_option_check', sql`${table.correct_option} IN ('A','B','C','D')`), index('idx_questions_category_difficulty').on(table.category, table.difficulty)]);
+}, (table) => [
+  check(
+    'questions_type_check',
+    sql`${table.question_type} IN ('mcq_single','mcq_multi','true_false','short_answer','numeric','matching','ordering')`,
+  ),
+  check(
+    'questions_correct_option_check',
+    sql`(${table.question_type} = 'mcq_single' AND ${table.correct_option} IN ('A','B','C','D')) OR (${table.question_type} != 'mcq_single' AND (${table.correct_option} = '' OR ${table.correct_option} IN ('A','B','C','D')))`,
+  ),
+  index('idx_questions_category_difficulty').on(table.category, table.difficulty),
+  index('idx_questions_type').on(table.question_type),
+]);
 
 export const exams = sqliteTable('exams', {
   id: integer('id').primaryKey({ autoIncrement: true }),
@@ -65,6 +90,7 @@ export const answers = sqliteTable('answers', {
   attempt_id: integer('attempt_id').notNull().references(() => attempts.id, { onDelete: 'cascade' }),
   question_id: integer('question_id').notNull().references(() => questions.id, { onDelete: 'restrict' }),
   selected_option: text('selected_option'),
+  answer_data: text('answer_data'),
   is_correct: integer('is_correct'),
   marks_awarded: real('marks_awarded').notNull().default(0),
 }, (table) => [

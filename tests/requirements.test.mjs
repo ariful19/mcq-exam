@@ -114,7 +114,19 @@ test('MCQ requirements work through the local API and persist in SQLite', { time
 
     response = await admin('/api/admin/questions', { method: 'POST', body: question('Manual entry?', 'A', 'Integration QA', 'Manual explanation.') });
     assert.equal(response.status, 201, JSON.stringify(response.data));
+    assert.equal(response.data.question_type, 'mcq_single');
+    assert.deepEqual(response.data.answer_key, { correct_option: 'A' });
     const manualId = response.data.id;
+
+    // Reject unsupported or malformed question types via API
+    assert.equal((await admin('/api/admin/questions', {
+      method: 'POST',
+      body: { question_text: 'Video Q?', question_type: 'video_question', category: 'Integration QA' },
+    })).status, 400);
+    assert.equal((await admin('/api/admin/questions', {
+      method: 'POST',
+      body: { question_text: 'AI Q?', question_type: 'short_answer', category: 'Integration QA', question_config: { grading_mode: 'ai' }, answer_key: { accepted_answers: ['yes'] } },
+    })).status, 400);
 
     response = await admin('/api/admin/questions/bulk', { method: 'POST', body: { subject: 'Integration QA', text: bulkBlock(1) } });
     assert.equal(response.status, 200, JSON.stringify(response.data));
@@ -199,7 +211,7 @@ test('MCQ requirements work through the local API and persist in SQLite', { time
     const active = await anonymous(`/api/attempts/${token}`);
     assert.equal(active.status, 200);
     assert.equal(active.data.address, 'Dhaka');
-    assert.ok(active.data.questions.every((item) => !('correct_option' in item) && !('explanation' in item)), 'Active exam must not disclose answer keys.');
+    assert.ok(active.data.questions.every((item) => !('correct_option' in item) && !('answer_key' in item) && !('explanation' in item)), 'Active exam must not disclose answer keys.');
     assert.equal((await anonymous(`/api/attempts/${token}/answers`, { method: 'PUT', body: { question_id: manualId, selected_option: 'A' } })).status, 200);
     assert.equal((await anonymous(`/api/attempts/${token}/answers`, { method: 'PUT', body: { question_id: pasteId, selected_option: 'A' } })).status, 200);
     response = await anonymous(`/api/attempts/${token}/submit`, { method: 'POST' });
@@ -309,7 +321,7 @@ test('Hosted backend preserves question history and exports and deletes data', a
   const { default: worker } = await import('../dist/server/index.js');
   const sqlite = new Database(':memory:');
   sqlite.pragma('foreign_keys = ON');
-  for (const file of ['0000_green_maggott.sql', '0001_supreme_inertia.sql', '0002_long_clea.sql', '0003_add_short_url.sql', '0004_add_allow_pdf_download.sql']) {
+  for (const file of ['0000_green_maggott.sql', '0001_supreme_inertia.sql', '0002_long_clea.sql', '0003_add_short_url.sql', '0004_add_allow_pdf_download.sql', '0005_extensible_question_types.sql']) {
     sqlite.exec(readFileSync(path.join(root, 'drizzle', file), 'utf8'));
   }
   const DB = {
@@ -388,4 +400,3 @@ test('PDF helper sanitizes unicode and formats result documents cleanly', async 
   assert.equal(cleanText(null), '');
   assert.equal(cleanText(undefined), '');
 });
-

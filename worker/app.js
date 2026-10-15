@@ -3,36 +3,25 @@ import * as XLSX from 'xlsx/xlsx.mjs';
 import seedData from '../site-seed.json';
 import { CLIENT_ASSETS } from 'virtual:client-assets';
 import { shortenWithIsgd } from '../server/isgd.js';
+import {
+  normalizeQuestion,
+  hydrateQuestionRow,
+  hydrateAnswerRow,
+  validateStudentAnswer,
+  evaluateQuestionAnswer,
+  buildLegacyMcqConfig,
+  buildLegacyMcqAnswerKey,
+} from '../server/question-types.js';
 
 const app = new Hono();
-const optionKeys = { A: 'option_a', B: 'option_b', C: 'option_c', D: 'option_d' };
 const templateHeaders = ['Question', 'Option A', 'Option B', 'Option C', 'Option D', 'Correct Answer', 'Category', 'Difficulty', 'Explanation'];
+const optionalImportHeaders = ['Question Type', 'Question Config', 'Answer Key', 'Media'];
 const sessionSeconds = 8 * 60 * 60;
-const allowedNegativeMarks = [1, 0.25, 0.5];
+const allowedNegativeMarks = [0, 1, 0.25, 0.5];
 const passwordIterations = 210000;
 
 function apiError(c, status, error, details) {
   return c.json({ error, ...(details ? { details } : {}) }, status);
-}
-
-function normalizeQuestion(input = {}) {
-  const question = {
-    question_text: String(input.question_text ?? input.Question ?? '').trim(),
-    option_a: String(input.option_a ?? input['Option A'] ?? '').trim(),
-    option_b: String(input.option_b ?? input['Option B'] ?? '').trim(),
-    option_c: String(input.option_c ?? input['Option C'] ?? '').trim(),
-    option_d: String(input.option_d ?? input['Option D'] ?? '').trim(),
-    correct_option: String(input.correct_option ?? input['Correct Answer'] ?? '').trim().toUpperCase(),
-    category: String(input.category ?? input.Category ?? input.subject ?? input.Subject ?? '').trim(),
-    difficulty: String(input.difficulty ?? input.Difficulty ?? '').trim(),
-    explanation: String(input.explanation ?? input.Explanation ?? '').trim(),
-  };
-  const errors = [];
-  if (!question.question_text) errors.push('Question is required.');
-  for (const letter of ['a', 'b', 'c', 'd']) if (!question[`option_${letter}`]) errors.push(`Option ${letter.toUpperCase()} is required.`);
-  if (!['A', 'B', 'C', 'D'].includes(question.correct_option)) errors.push('Correct answer must be A, B, C or D.');
-  if (!question.category) errors.push('Subject is required.');
-  return { question, errors };
 }
 
 function parseBulkQuestions(text, subject) {
@@ -157,8 +146,32 @@ async function ensureSeeded(db) {
   if (marker) return;
   const statements = [db.prepare("INSERT INTO site_meta (key,value) VALUES ('initial_seed','1') ON CONFLICT(key) DO NOTHING")];
   for (const q of seedData.questions) {
-    statements.push(db.prepare(`INSERT INTO questions (id,question_text,option_a,option_b,option_c,option_d,correct_option,category,difficulty,explanation,created_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`).bind(q.id,q.question_text,q.option_a,q.option_b,q.option_c,q.option_d,q.correct_option,q.category,q.difficulty,q.explanation || '',q.created_at));
+    const qType = q.question_type || 'mcq_single';
+    const qConfig = typeof q.question_config === 'string'
+      ? q.question_config
+      : JSON.stringify(q.question_config || buildLegacyMcqConfig(q));
+    const answerKey = typeof q.answer_key === 'string'
+      ? q.answer_key
+      : JSON.stringify(q.answer_key || buildLegacyMcqAnswerKey(q));
+    const media = q.media ? (typeof q.media === 'string' ? q.media : JSON.stringify(q.media)) : null;
+    statements.push(db.prepare(`INSERT INTO questions (id,question_text,question_type,option_a,option_b,option_c,option_d,correct_option,question_config,answer_key,media,category,difficulty,explanation,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`).bind(
+      q.id,
+      q.question_text,
+      qType,
+      q.option_a,
+      q.option_b,
+      q.option_c,
+      q.option_d,
+      q.correct_option,
+      qConfig,
+      answerKey,
+      media,
+      q.category,
+      q.difficulty,
+      q.explanation || '',
+      q.created_at,
+    ));
   }
   for (const e of seedData.exams) {
     statements.push(db.prepare(`INSERT INTO exams (id,title,description,duration_minutes,subject,negative_mark,status,show_score,show_answers,created_at)
@@ -172,7 +185,8 @@ async function ensureSeeded(db) {
 }
 
 async function getExamQuestions(db, examId) {
-  const { results = [] } = await db.prepare(`SELECT q.id,q.question_text,q.option_a,q.option_b,q.option_c,q.option_d,q.correct_option,q.explanation,q.category,
+  const { results = [] } = await db.prepare(`SELECT q.id,q.question_text,q.question_type,q.option_a,q.option_b,q.option_c,q.option_d,
+      q.correct_option,q.question_config,q.answer_key,q.media,q.explanation,q.category,
       eq.marks,eq.sort_order FROM exam_questions eq JOIN questions q ON q.id=eq.question_id
     WHERE eq.exam_id=? ORDER BY eq.sort_order,eq.id`).bind(examId).all();
   return results;
@@ -190,15 +204,14 @@ async function finalizeAttempt(db, attemptId, status) {
     db.prepare('SELECT * FROM answers WHERE attempt_id=?').bind(attemptId).all(),
   ]);
   const existing = new Map((answerResult.results || []).map((answer) => [answer.question_id, answer]));
+  const negativeMark = Number(attempt.negative_mark || 0);
   let score = 0;
   const statements = [];
   for (const question of questions) {
     const answer = existing.get(question.id);
-    const answered = Boolean(answer?.selected_option);
-    const correct = Boolean(answered && answer.selected_option === question.correct_option);
-    const marks = correct ? question.marks : answered ? -Number(attempt.negative_mark || 0) : 0;
-    score += marks;
-    if (answer) statements.push(db.prepare('UPDATE answers SET is_correct=?,marks_awarded=? WHERE id=?').bind(correct ? 1 : 0, marks, answer.id));
+    const { isCorrect, marksAwarded } = evaluateQuestionAnswer(question, answer, negativeMark);
+    score += marksAwarded;
+    if (answer) statements.push(db.prepare('UPDATE answers SET is_correct=?,marks_awarded=? WHERE id=?').bind(isCorrect ? 1 : 0, marksAwarded, answer.id));
   }
   statements.push(db.prepare(`UPDATE attempts SET status=?,submitted_at=?,score=? WHERE id=? AND status='in_progress'`)
     .bind(status, new Date().toISOString(), score, attemptId));
@@ -229,10 +242,11 @@ async function safeResult(db, attempt, detailed) {
   };
   if (attempt.show_score || attempt.allow_pdf_download) result.score = attempt.score;
   if (detailed && ((attempt.show_answers && attempt.show_score) || attempt.allow_pdf_download)) {
-    result.answers = await db.prepare(`SELECT q.id AS question_id,q.question_text,q.option_a,q.option_b,q.option_c,q.option_d,q.correct_option,q.explanation,
-        eq.marks,a.selected_option,a.is_correct,a.marks_awarded FROM exam_questions eq JOIN questions q ON q.id=eq.question_id
+    result.answers = await db.prepare(`SELECT q.id AS question_id,q.question_text,q.question_type,q.option_a,q.option_b,q.option_c,q.option_d,
+        q.correct_option,q.question_config,q.answer_key,q.media,q.explanation,
+        eq.marks,a.selected_option,a.answer_data,a.is_correct,a.marks_awarded FROM exam_questions eq JOIN questions q ON q.id=eq.question_id
       LEFT JOIN answers a ON a.question_id=q.id AND a.attempt_id=? WHERE eq.exam_id=? ORDER BY eq.sort_order,eq.id`)
-      .bind(attempt.id, attempt.exam_id).all().then((response) => response.results || []);
+      .bind(attempt.id, attempt.exam_id).all().then((response) => (response.results || []).map((row) => hydrateAnswerRow(row)));
   }
   return result;
 }
@@ -305,15 +319,30 @@ app.get('/api/admin/questions', requireAdmin, async (c) => {
   await ensureSeeded(c.env.DB);
   const { results = [] } = await c.env.DB.prepare(`SELECT q.*,
     EXISTS(SELECT 1 FROM exam_questions eq WHERE eq.question_id=q.id) AS locked FROM questions q WHERE q.archived=0 ORDER BY q.id DESC`).all();
-  return c.json(results);
+  return c.json(results.map((row) => hydrateQuestionRow(row)));
 });
 
 app.post('/api/admin/questions', requireAdmin, async (c) => {
   const { question, errors } = normalizeQuestion(await c.req.json().catch(() => ({})));
   if (errors.length) return apiError(c, 400, 'Please correct the question details.', errors);
-  const result = await c.env.DB.prepare(`INSERT INTO questions (question_text,option_a,option_b,option_c,option_d,correct_option,category,difficulty,explanation)
-    VALUES (?,?,?,?,?,?,?,?,?)`).bind(question.question_text,question.option_a,question.option_b,question.option_c,question.option_d,question.correct_option,question.category,question.difficulty,question.explanation).run();
-  return c.json(await c.env.DB.prepare('SELECT * FROM questions WHERE id=?').bind(result.meta.last_row_id).first(), 201);
+  const result = await c.env.DB.prepare(`INSERT INTO questions (question_text,question_type,option_a,option_b,option_c,option_d,correct_option,question_config,answer_key,media,category,difficulty,explanation)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+    question.question_text,
+    question.question_type,
+    question.option_a,
+    question.option_b,
+    question.option_c,
+    question.option_d,
+    question.correct_option,
+    question.question_config,
+    question.answer_key,
+    question.media,
+    question.category,
+    question.difficulty,
+    question.explanation,
+  ).run();
+  const created = await c.env.DB.prepare('SELECT * FROM questions WHERE id=?').bind(result.meta.last_row_id).first();
+  return c.json(hydrateQuestionRow(created), 201);
 });
 
 app.post('/api/admin/questions/bulk', requireAdmin, async (c) => {
@@ -323,8 +352,22 @@ app.post('/api/admin/questions/bulk', requireAdmin, async (c) => {
   const { questions, errors } = parseBulkQuestions(body.text, subject);
   if (errors.length) return apiError(c, 400, 'Please use the required question format. No questions were imported.', errors);
   await c.env.DB.batch(questions.map((question) => c.env.DB.prepare(`INSERT INTO questions
-    (question_text,option_a,option_b,option_c,option_d,correct_option,category,difficulty,explanation) VALUES (?,?,?,?,?,?,?,?,?)`)
-    .bind(question.question_text,question.option_a,question.option_b,question.option_c,question.option_d,question.correct_option,question.category,question.difficulty,question.explanation)));
+    (question_text,question_type,option_a,option_b,option_c,option_d,correct_option,question_config,answer_key,media,category,difficulty,explanation) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .bind(
+      question.question_text,
+      question.question_type,
+      question.option_a,
+      question.option_b,
+      question.option_c,
+      question.option_d,
+      question.correct_option,
+      question.question_config,
+      question.answer_key,
+      question.media,
+      question.category,
+      question.difficulty,
+      question.explanation,
+    )));
   return c.json({ imported: questions.length });
 });
 
@@ -336,15 +379,46 @@ app.put('/api/admin/questions/:id', requireAdmin, async (c) => {
   if (errors.length) return apiError(c, 400, 'Please correct the question details.', errors);
   if (await c.env.DB.prepare('SELECT 1 FROM exam_questions WHERE question_id=? LIMIT 1').bind(id).first()) {
     const results = await c.env.DB.batch([
-      c.env.DB.prepare(`INSERT INTO questions (question_text,option_a,option_b,option_c,option_d,correct_option,category,difficulty,explanation)
-        VALUES (?,?,?,?,?,?,?,?,?)`).bind(question.question_text,question.option_a,question.option_b,question.option_c,question.option_d,question.correct_option,question.category,question.difficulty,question.explanation),
+      c.env.DB.prepare(`INSERT INTO questions (question_text,question_type,option_a,option_b,option_c,option_d,correct_option,question_config,answer_key,media,category,difficulty,explanation)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+        question.question_text,
+        question.question_type,
+        question.option_a,
+        question.option_b,
+        question.option_c,
+        question.option_d,
+        question.correct_option,
+        question.question_config,
+        question.answer_key,
+        question.media,
+        question.category,
+        question.difficulty,
+        question.explanation,
+      ),
       c.env.DB.prepare('UPDATE questions SET archived=1 WHERE id=?').bind(id),
     ]);
-    return c.json(await c.env.DB.prepare('SELECT * FROM questions WHERE id=?').bind(results[0].meta.last_row_id).first());
+    const replacement = await c.env.DB.prepare('SELECT * FROM questions WHERE id=?').bind(results[0].meta.last_row_id).first();
+    return c.json(hydrateQuestionRow(replacement));
   }
-  await c.env.DB.prepare(`UPDATE questions SET question_text=?,option_a=?,option_b=?,option_c=?,option_d=?,correct_option=?,category=?,difficulty=?,explanation=? WHERE id=?`)
-    .bind(question.question_text,question.option_a,question.option_b,question.option_c,question.option_d,question.correct_option,question.category,question.difficulty,question.explanation,id).run();
-  return c.json(await c.env.DB.prepare('SELECT * FROM questions WHERE id=?').bind(id).first());
+  await c.env.DB.prepare(`UPDATE questions SET question_text=?,question_type=?,option_a=?,option_b=?,option_c=?,option_d=?,correct_option=?,question_config=?,answer_key=?,media=?,category=?,difficulty=?,explanation=? WHERE id=?`)
+    .bind(
+      question.question_text,
+      question.question_type,
+      question.option_a,
+      question.option_b,
+      question.option_c,
+      question.option_d,
+      question.correct_option,
+      question.question_config,
+      question.answer_key,
+      question.media,
+      question.category,
+      question.difficulty,
+      question.explanation,
+      id,
+    ).run();
+  const updated = await c.env.DB.prepare('SELECT * FROM questions WHERE id=?').bind(id).first();
+  return c.json(hydrateQuestionRow(updated));
 });
 
 app.delete('/api/admin/questions/:id', requireAdmin, async (c) => {
@@ -387,10 +461,11 @@ app.post('/api/admin/questions/import', requireAdmin, async (c) => {
   if (missing.length) return apiError(c, 400, `Missing required columns: ${missing.join(', ')}.`);
   const imported = [];
   const errors = [];
+  const allRecognizedHeaders = [...templateHeaders, ...optionalImportHeaders];
   for (let index = 1; index < rows.length; index += 1) {
     const cells = rows[index];
     if (cells.every((value) => String(value ?? '').trim() === '')) continue;
-    const input = Object.fromEntries(templateHeaders.map((header) => [header, headerIndexes.has(header.toLowerCase()) ? (cells[headerIndexes.get(header.toLowerCase())] ?? '') : '']));
+    const input = Object.fromEntries(allRecognizedHeaders.map((header) => [header, headerIndexes.has(header.toLowerCase()) ? (cells[headerIndexes.get(header.toLowerCase())] ?? '') : '']));
     if (!String(input.Category ?? '').trim()) input.Category = uploadSubject;
     const { question, errors: rowErrors } = normalizeQuestion(input);
     rowErrors.forEach((error) => errors.push(`Row ${index + 1}: ${error}`));
@@ -400,8 +475,22 @@ app.post('/api/admin/questions/import', requireAdmin, async (c) => {
   if (!imported.length && !errors.length) errors.push('No populated question rows were found.');
   if (errors.length) return apiError(c, 400, 'The workbook has validation errors. No questions were imported.', errors);
   await c.env.DB.batch(imported.map((q) => c.env.DB.prepare(`INSERT INTO questions
-    (question_text,option_a,option_b,option_c,option_d,correct_option,category,difficulty,explanation) VALUES (?,?,?,?,?,?,?,?,?)`)
-    .bind(q.question_text,q.option_a,q.option_b,q.option_c,q.option_d,q.correct_option,q.category,q.difficulty,q.explanation)));
+    (question_text,question_type,option_a,option_b,option_c,option_d,correct_option,question_config,answer_key,media,category,difficulty,explanation) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .bind(
+      q.question_text,
+      q.question_type,
+      q.option_a,
+      q.option_b,
+      q.option_c,
+      q.option_d,
+      q.correct_option,
+      q.question_config,
+      q.answer_key,
+      q.media,
+      q.category,
+      q.difficulty,
+      q.explanation,
+    )));
   return c.json({ imported: imported.length });
 });
 
@@ -416,6 +505,9 @@ app.get('/api/admin/exams', requireAdmin, async (c) => {
 
 app.post('/api/admin/exams', requireAdmin, async (c) => {
   const body = await c.req.json().catch(() => ({}));
+  if (body.mandatory_sections || body.require_sections) {
+    return apiError(c, 400, 'Mandatory exam sections are not supported.');
+  }
   const title = String(body.title || '').trim();
   const description = String(body.description || '').trim();
   const duration = Number(body.duration_minutes);
@@ -427,7 +519,7 @@ app.post('/api/admin/exams', requireAdmin, async (c) => {
   const allowPdfDownload = body.allow_pdf_download ? 1 : 0;
   const ids = Array.isArray(body.question_ids) ? [...new Set(body.question_ids.map(Number).filter(Number.isSafeInteger))] : [];
   if (!title) return apiError(c, 400, 'Exam title is required.');
-  if (!allowedNegativeMarks.includes(negativeMark)) return apiError(c, 400, 'Choose a negative mark of 1, 0.25, or 0.50.');
+  if (!allowedNegativeMarks.includes(negativeMark)) return apiError(c, 400, 'Choose a negative mark of 0, 1, 0.25, or 0.50.');
   if (!Number.isInteger(duration) || duration < 1 || duration > 1440) return apiError(c, 400, 'Duration must be between 1 and 1440 minutes.');
   if (showAnswers && !showScore) return apiError(c, 400, 'Show score must be enabled to show answer review.');
   if (!ids.length) return apiError(c, 400, 'Select at least one question for this exam.');
@@ -547,7 +639,7 @@ app.patch('/api/admin/exams/:id/short_url', requireAdmin, async (c) => {
 
 app.get('/api/admin/exams/:id/questions', requireAdmin, async (c) => {
   await ensureSeeded(c.env.DB);
-  const questions = await getExamQuestions(c.env.DB, Number(c.req.param('id')));
+  const questions = (await getExamQuestions(c.env.DB, Number(c.req.param('id')))).map((row) => hydrateQuestionRow(row));
   if (!questions.length) return apiError(c, 404, 'Exam not found or it has no questions.');
   return c.json(questions);
 });
@@ -564,11 +656,12 @@ app.get('/api/admin/attempts/:id', requireAdmin, async (c) => {
   const attempt = await c.env.DB.prepare(`SELECT a.*,e.title AS exam_title FROM attempts a JOIN exams e ON e.id=a.exam_id WHERE a.id=?`)
     .bind(Number(c.req.param('id'))).first();
   if (!attempt) return apiError(c, 404, 'Attempt not found.');
-  const { results: answers = [] } = await c.env.DB.prepare(`SELECT q.id AS question_id,q.question_text,q.option_a,q.option_b,q.option_c,q.option_d,q.correct_option,
-      q.explanation,eq.marks,a.selected_option,a.is_correct,a.marks_awarded FROM exam_questions eq JOIN questions q ON q.id=eq.question_id
+  const { results: rawAnswers = [] } = await c.env.DB.prepare(`SELECT q.id AS question_id,q.question_text,q.question_type,q.option_a,q.option_b,q.option_c,q.option_d,
+      q.correct_option,q.question_config,q.answer_key,q.media,q.explanation,eq.marks,a.selected_option,a.answer_data,a.is_correct,a.marks_awarded
+    FROM exam_questions eq JOIN questions q ON q.id=eq.question_id
     LEFT JOIN answers a ON a.question_id=q.id AND a.attempt_id=? WHERE eq.exam_id=? ORDER BY eq.sort_order,eq.id`)
     .bind(attempt.id,attempt.exam_id).all();
-  return c.json({ ...attempt, answers });
+  return c.json({ ...attempt, answers: rawAnswers.map((row) => hydrateAnswerRow(row)) });
 });
 
 app.post('/api/exams/:id/attempts', async (c) => {
@@ -597,11 +690,9 @@ app.get('/api/attempts/:token', async (c) => {
   const attempt = await getStudentAttempt(c.env.DB, c.req.param('token'));
   if (!attempt) return apiError(c, 404, 'Attempt not found. Return to the exam list to start again.');
   const deadline = deadlineFor(attempt);
-  const questions = (await getExamQuestions(c.env.DB, attempt.exam_id)).map((question) => ({
-    id: question.id,question_text: question.question_text,option_a: question.option_a,option_b: question.option_b,
-    option_c: question.option_c,option_d: question.option_d,marks: question.marks,sort_order: question.sort_order,
-  }));
-  const { results: answers = [] } = await c.env.DB.prepare('SELECT question_id,selected_option FROM answers WHERE attempt_id=?').bind(attempt.id).all();
+  const questions = (await getExamQuestions(c.env.DB, attempt.exam_id)).map((question) => hydrateQuestionRow(question, { includeAnswerKey: false }));
+  const { results: rawAnswers = [] } = await c.env.DB.prepare('SELECT question_id,selected_option,answer_data FROM answers WHERE attempt_id=?').bind(attempt.id).all();
+  const answers = rawAnswers.map((row) => hydrateAnswerRow(row, { forActiveAttempt: true }));
   return c.json({
     id: attempt.id,exam_id: attempt.exam_id,exam_title: attempt.exam_title,student_name: attempt.student_name,
     roll_number: attempt.roll_number,email: attempt.email,address: attempt.address,status: attempt.status,started_at: attempt.started_at,
@@ -617,13 +708,21 @@ app.put('/api/attempts/:token/answers', async (c) => {
   if (attempt.status !== 'in_progress') return apiError(c, 409, 'This attempt has already been submitted.', { result: await safeResult(c.env.DB,attempt,true) });
   const body = await c.req.json().catch(() => ({}));
   const questionId = Number(body.question_id);
-  const selectedOption = body.selected_option === null || body.selected_option === '' ? null : String(body.selected_option || '').toUpperCase();
-  if (!['A','B','C','D',null].includes(selectedOption)) return apiError(c, 400, 'Choose option A, B, C or D.');
-  if (!await c.env.DB.prepare('SELECT 1 FROM exam_questions WHERE exam_id=? AND question_id=?').bind(attempt.exam_id,questionId).first()) return apiError(c, 400, 'That question is not part of this examination.');
-  const saved = await c.env.DB.prepare(`INSERT INTO answers (attempt_id,question_id,selected_option)
-    SELECT a.id,?,? FROM attempts a WHERE a.id=? AND a.status='in_progress'
-    ON CONFLICT(attempt_id,question_id) DO UPDATE SET selected_option=excluded.selected_option,is_correct=NULL,marks_awarded=0`)
-    .bind(questionId,selectedOption,attempt.id).run();
+  const examQuestion = await c.env.DB.prepare(`SELECT q.* FROM exam_questions eq JOIN questions q ON q.id=eq.question_id WHERE eq.exam_id=? AND eq.question_id=?`)
+    .bind(attempt.exam_id, questionId).first();
+  if (!examQuestion) {
+    if (body.selected_option !== undefined && body.answer_data === undefined) {
+      const selectedOption = body.selected_option === null || body.selected_option === '' ? null : String(body.selected_option || '').toUpperCase();
+      if (!['A','B','C','D',null].includes(selectedOption)) return apiError(c, 400, 'Choose option A, B, C or D.');
+    }
+    return apiError(c, 400, 'That question is not part of this examination.');
+  }
+  const validated = validateStudentAnswer(examQuestion, body);
+  if (validated.error) return apiError(c, 400, validated.error);
+  const saved = await c.env.DB.prepare(`INSERT INTO answers (attempt_id,question_id,selected_option,answer_data)
+    SELECT a.id,?,?,? FROM attempts a WHERE a.id=? AND a.status='in_progress'
+    ON CONFLICT(attempt_id,question_id) DO UPDATE SET selected_option=excluded.selected_option,answer_data=excluded.answer_data,is_correct=NULL,marks_awarded=0`)
+    .bind(questionId,validated.selected_option,validated.answerDataJson,attempt.id).run();
   if (!saved.meta.changes) return apiError(c, 409, 'This attempt has already been submitted.');
   return c.json({ ok: true });
 });

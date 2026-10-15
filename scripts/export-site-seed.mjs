@@ -8,8 +8,8 @@ const databasePath = path.resolve(process.env.DB_PATH || path.join(root, 'data/m
 const outputPath = path.join(root, 'site-seed.json');
 const db = new Database(databasePath, { readonly: true });
 
-const questions = db.prepare(`SELECT id, question_text, option_a, option_b, option_c, option_d,
-  correct_option, category, difficulty, created_at FROM questions ORDER BY id`).all();
+const questions = db.prepare(`SELECT id, question_text, question_type, option_a, option_b, option_c, option_d,
+  correct_option, question_config, answer_key, media, category, difficulty, explanation, created_at FROM questions ORDER BY id`).all();
 const exams = db.prepare(`SELECT id, title, description, duration_minutes, status, show_score,
   show_answers, created_at FROM exams WHERE status='published' ORDER BY id`).all()
   .map((exam) => ({

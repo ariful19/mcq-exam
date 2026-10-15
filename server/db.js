@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { migrateSqliteDatabase } from './question-types.js';
 
 const databasePath = path.resolve(process.env.DB_PATH || 'data/mcq.db');
 fs.mkdirSync(path.dirname(databasePath), { recursive: true });
@@ -12,16 +13,23 @@ db.pragma('foreign_keys = ON');
 db.exec(`
   CREATE TABLE IF NOT EXISTS questions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    archived INTEGER NOT NULL DEFAULT 0,
     question_text TEXT NOT NULL,
-    option_a TEXT NOT NULL,
-    option_b TEXT NOT NULL,
-    option_c TEXT NOT NULL,
-    option_d TEXT NOT NULL,
-    correct_option TEXT NOT NULL CHECK (correct_option IN ('A','B','C','D')),
+    question_type TEXT NOT NULL DEFAULT 'mcq_single',
+    option_a TEXT NOT NULL DEFAULT '',
+    option_b TEXT NOT NULL DEFAULT '',
+    option_c TEXT NOT NULL DEFAULT '',
+    option_d TEXT NOT NULL DEFAULT '',
+    correct_option TEXT NOT NULL DEFAULT '',
+    question_config TEXT NOT NULL DEFAULT '{}',
+    answer_key TEXT NOT NULL DEFAULT '{}',
+    media TEXT,
     category TEXT NOT NULL DEFAULT '',
     difficulty TEXT NOT NULL DEFAULT '',
     explanation TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT questions_type_check CHECK (question_type IN ('mcq_single','mcq_multi','true_false','short_answer','numeric','matching','ordering')),
+    CONSTRAINT questions_correct_option_check CHECK ((question_type = 'mcq_single' AND correct_option IN ('A','B','C','D')) OR (question_type != 'mcq_single' AND (correct_option = '' OR correct_option IN ('A','B','C','D'))))
   );
   CREATE TABLE IF NOT EXISTS exams (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,7 +71,8 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     attempt_id INTEGER NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
     question_id INTEGER NOT NULL REFERENCES questions(id) ON DELETE RESTRICT,
-    selected_option TEXT CHECK (selected_option IN ('A','B','C','D')),
+    selected_option TEXT CHECK (selected_option IS NULL OR selected_option IN ('A','B','C','D')),
+    answer_data TEXT,
     is_correct INTEGER CHECK (is_correct IN (0,1) OR is_correct IS NULL),
     marks_awarded REAL NOT NULL DEFAULT 0,
     UNIQUE (attempt_id, question_id)
@@ -83,22 +92,9 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_attempts_token ON attempts(access_token);
 `);
 
-// Keep existing local databases usable when the application adds fields.
-// These additive migrations preserve all question, exam, and attempt records.
-function addColumnIfMissing(table, column, definition) {
-  const columns = db.pragma(`table_info(${table})`);
-  if (!columns.some((item) => item.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${definition}`);
-}
-
-db.transaction(() => {
-  addColumnIfMissing('questions', 'archived', 'archived INTEGER NOT NULL DEFAULT 0');
-  addColumnIfMissing('questions', 'explanation', "explanation TEXT NOT NULL DEFAULT ''");
-  addColumnIfMissing('exams', 'subject', "subject TEXT NOT NULL DEFAULT ''");
-  addColumnIfMissing('exams', 'negative_mark', 'negative_mark REAL NOT NULL DEFAULT 0');
-  addColumnIfMissing('exams', 'short_url', "short_url TEXT NOT NULL DEFAULT ''");
-  addColumnIfMissing('exams', 'allow_pdf_download', 'allow_pdf_download INTEGER NOT NULL DEFAULT 0');
-  addColumnIfMissing('attempts', 'address', "address TEXT NOT NULL DEFAULT ''");
-})();
+// Keep existing local databases usable when the application adds fields or upgrades question types.
+// These migrations preserve all question, archived version, exam, attempt, and result records.
+migrateSqliteDatabase(db);
 
 // Seed the persistent administrator credential once. Later environment changes
 // do not silently overwrite a password changed from the application.
