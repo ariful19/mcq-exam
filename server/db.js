@@ -152,6 +152,8 @@ const defaultSettings = {
   footer_tagline: 'Thoughtful assessment, made simple ✦',
   public_url: '',
   enable_short_urls: '0',
+  enable_animations: '1',
+  auto_device_animations: '1',
 };
 
 const insertSetting = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');

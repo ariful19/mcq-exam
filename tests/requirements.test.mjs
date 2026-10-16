@@ -241,6 +241,29 @@ test('MCQ requirements work through the local API and persist in SQLite', { time
     response = await anonymous(`/api/attempts/${token}`);
     assert.equal(response.data.result.allow_pdf_download, false);
 
+    // Verify portal settings and animation flags
+    const initialSettings = await anonymous('/api/settings');
+    assert.equal(initialSettings.status, 200);
+    assert.equal(initialSettings.data.enable_animations, '1');
+    assert.equal(initialSettings.data.auto_device_animations, '1');
+
+    const updatedSettings = await admin('/api/admin/settings', {
+      method: 'PUT',
+      body: {
+        site_title: 'Custom Title',
+        enable_animations: '0',
+        auto_device_animations: '0',
+      },
+    });
+    assert.equal(updatedSettings.status, 200);
+    assert.equal(updatedSettings.data.enable_animations, '0');
+    assert.equal(updatedSettings.data.auto_device_animations, '0');
+    assert.equal(updatedSettings.data.site_title, 'Custom Title');
+
+    const verifiedSettings = await anonymous('/api/settings');
+    assert.equal(verifiedSettings.data.enable_animations, '0');
+    assert.equal(verifiedSettings.data.auto_device_animations, '0');
+
     for (const penalty of [0.5, 1]) {
       response = await admin('/api/admin/exams', { method: 'POST', body: { ...examBody, title: `Penalty ${penalty}`, negative_mark: penalty, question_ids: [manualId] } });
       assert.equal(response.status, 201, JSON.stringify(response.data));

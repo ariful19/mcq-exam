@@ -740,6 +740,55 @@ body {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
 }
 
+body.no-animations {
+  background: #f5f6fa !important;
+}
+
+.no-animations,
+.no-animations *,
+.no-animations *::before,
+.no-animations *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
+  scroll-behavior: auto !important;
+}
+
+.no-animations .art-paper,
+.no-animations .art-sun,
+.no-animations .art-star,
+.no-animations .art-orbit {
+  display: none !important;
+}
+
+.no-animations .site-header,
+.no-animations .login-card,
+.no-animations .exam-card,
+.no-animations .stat-card,
+.no-animations .admin-panel,
+.no-animations .modal-card,
+.no-animations .result-card,
+.no-animations .direct-exam-card,
+.no-animations .exam-sidebar,
+.no-animations .question-stage,
+.no-animations .question-dialog,
+.no-animations .message-dialog,
+.no-animations .toast,
+.no-animations .welcome-panel {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  background: #ffffff !important;
+  box-shadow: 0 4px 18px #2734510d !important;
+}
+
+.no-animations .question-dialog::backdrop,
+.no-animations .message-dialog::backdrop,
+.no-animations .modal-backdrop {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  background: #17182e66 !important;
+}
+
 .attempt-list-item { display: flex; align-items: center; gap: 8px; border-bottom: 1px solid #f1f1f5; }
 .result-list-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin: 16px 0; padding: 14px; border: 1px solid #ffffffd9; border-radius: 14px; background: #ffffff80; }
 .result-list-controls label { display: flex; flex: 1 1 180px; min-width: 0; flex-direction: column; gap: 7px; font-size: 12px; font-weight: 650; color: #526079; }

@@ -1,7 +1,7 @@
 import { LitElement, html } from 'lit';
 import { keyed } from 'lit/directives/keyed.js';
 import './style.css';
-import { installMotion, appear, disappear, slideQuestion } from './motion.js';
+import { installMotion, appear, disappear, slideQuestion, setMotionActive, shouldEnableMotion } from './motion.js';
 import { filterAndSortResults } from './results.js';
 import { generateResultPdf } from './pdf.js';
 import {
@@ -128,6 +128,8 @@ export class McqApp extends LitElement {
       hero_tagline: 'A calm space to do your best work',
       public_url: '',
       enable_short_urls: '0',
+      enable_animations: '1',
+      auto_device_animations: '1',
       footer_copyright: 'Northstar Examination Portal',
       footer_tagline: 'Thoughtful assessment, made simple ✦',
     };
@@ -140,8 +142,26 @@ export class McqApp extends LitElement {
     return this.settings?.enable_short_urls === '1' || this.settings?.enable_short_urls === 'true' || this.settings?.enable_short_urls === true;
   }
 
+  get isAnimationsEnabled() {
+    return this.settings?.enable_animations !== '0' && this.settings?.enable_animations !== 'false' && this.settings?.enable_animations !== false;
+  }
+
+  get isAutoDeviceAnimationsEnabled() {
+    return this.settings?.auto_device_animations !== '0' && this.settings?.auto_device_animations !== 'false' && this.settings?.auto_device_animations !== false;
+  }
+
+  applyMotionSettings() {
+    const active = shouldEnableMotion(this.settings);
+    setMotionActive(active);
+    this.classList.toggle('no-animations', !active);
+    if (typeof document !== 'undefined') {
+      document.body?.classList.toggle('no-animations', !active);
+    }
+  }
+
   connectedCallback() {
     super.connectedCallback();
+    this.applyMotionSettings();
     this.stopMotion = installMotion(this);
     this.initialize();
   }
@@ -237,6 +257,7 @@ export class McqApp extends LitElement {
       const data = await api('/api/settings');
       if (data && typeof data === 'object') {
         this.settings = { ...this.settings, ...data };
+        this.applyMotionSettings();
         this.updateDocumentTitle();
         this.requestUpdate();
       }
@@ -674,6 +695,8 @@ export class McqApp extends LitElement {
     const form = event.currentTarget;
     const values = Object.fromEntries(new FormData(form));
     values.enable_short_urls = form.elements.enable_short_urls?.checked ? '1' : '0';
+    values.enable_animations = form.elements.enable_animations?.checked ? '1' : '0';
+    values.auto_device_animations = form.elements.auto_device_animations?.checked ? '1' : '0';
     this.settingsBusy = true;
     this.settingsError = '';
     this.requestUpdate();
@@ -684,6 +707,7 @@ export class McqApp extends LitElement {
         body: JSON.stringify(values),
       });
       this.settings = { ...this.settings, ...updated };
+      this.applyMotionSettings();
       this.updateDocumentTitle();
       this.notify('Portal branding & settings saved successfully.');
     } catch (error) {
@@ -1774,6 +1798,22 @@ export class McqApp extends LitElement {
             <label>Public domain name
               <input name="public_url" maxlength="255" .value=${this.settings.public_url || ''} placeholder="e.g. https://exams.example.com" />
               <small class="field-help">Optional domain URL used when shortening links.</small>
+            </label>
+          </div>
+          <div class="field-row">
+            <label class="check-setting" style="align-self: flex-start; margin-top: 6px;">
+              <input name="enable_animations" type="checkbox" .checked=${this.isAnimationsEnabled} value="1" />
+              <span>
+                <b>Enable UI animations & visual effects</b>
+                <small>Global toggle for 3D card motions, dialog animations, and liquid glass blur across all devices.</small>
+              </span>
+            </label>
+            <label class="check-setting" style="align-self: flex-start; margin-top: 6px;">
+              <input name="auto_device_animations" type="checkbox" .checked=${this.isAutoDeviceAnimationsEnabled} value="1" />
+              <span>
+                <b>Auto-detect device (Mobile & low-end optimization)</b>
+                <small>Automatically disables animations and heavy glass blur on smartphones, tablets, or low-spec hardware while keeping full motion on desktop.</small>
+              </span>
             </label>
           </div>
           ${this.settingsError ? html`<div class="inline-error">${this.settingsError}</div>` : ''}

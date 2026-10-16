@@ -210,6 +210,8 @@ app.put('/api/admin/settings', requireAdmin, (req, res) => {
     'footer_tagline',
     'public_url',
     'enable_short_urls',
+    'enable_animations',
+    'auto_device_animations',
   ];
   const updates = req.body || {};
   const upsert = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');

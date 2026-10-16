@@ -94,6 +94,8 @@ async function loadMcqAppClass() {
     export function appear() {}
     export async function disappear() {}
     export async function slideQuestion(_el, _dir, fn) { if (fn) await fn(); }
+    export function setMotionActive() {}
+    export function shouldEnableMotion() { return true; }
   `, 'utf8');
 
   const pdfStubPath = path.join(tmpDir, 'pdf-stub.mjs');
@@ -110,7 +112,7 @@ async function loadMcqAppClass() {
     .replace(`import { LitElement, html } from 'lit';`, `import { LitElement, html } from '${litStubUrl}';`)
     .replace(`import { keyed } from 'lit/directives/keyed.js';`, `import { keyed } from '${litStubUrl}';`)
     .replace(`import './style.css';`, ``)
-    .replace(`import { installMotion, appear, disappear, slideQuestion } from './motion.js';`, `import { installMotion, appear, disappear, slideQuestion } from '${motionStubUrl}';`)
+    .replace(/import\s*\{[^}]*\}\s*from\s*'\.\/motion\.js';/, `import { installMotion, appear, disappear, slideQuestion, setMotionActive, shouldEnableMotion } from '${motionStubUrl}';`)
     .replace(`import { filterAndSortResults } from './results.js';`, `import { filterAndSortResults } from '${resultsUrl}';`)
     .replace(`import { generateResultPdf } from './pdf.js';`, `import { generateResultPdf } from '${pdfStubUrl}';`)
     .replace(`from './question-authoring.js';`, `from '${authoringUrl}';`);
