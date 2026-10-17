@@ -43,6 +43,8 @@ Set `ADMIN_USERNAME`, `ADMIN_PASSWORD`, and `SESSION_SECRET` in the environment 
 
 Every new question needs a subject, stored in the existing `Category` field. An explanation is optional. Add questions individually, paste up to 300 at once, or import an Excel workbook.
 
+Questions can use the existing four-option single-select format, Yes/No, multi-select, True/False, short answer, numeric, matching, or ordering. Yes/No questions are graded full or zero. Students can select multiple options on multi-select questions; their responses save as they move through the exam. Multi-select partial credit is `max(0, correct selections ÷ correct options − incorrect selections ÷ incorrect options) × question marks`, capped at the question’s full marks. If there are no incorrect options, the incorrect-selection share is zero. Missing correct choices reduce earned credit, and selecting every option earns zero when distractors exist. Multi-select questions do not also receive the exam-level negative-mark penalty; other question types retain their existing penalty behavior.
+
 For text paste, choose a subject and separate numbered questions with a blank line:
 
 ```text

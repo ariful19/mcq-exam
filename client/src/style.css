@@ -286,8 +286,9 @@ input[type=checkbox] { accent-color: var(--purple); }
 .sheet-questions { display: flex; flex-direction: column; gap: 8px; }
 .sheet-question { padding: 10px; border: 1px solid #eeeef3; border-radius: 8px; background: #fff; }
 .sheet-question.is-pending { border-color: #eee8cf; background: #fffef9; }
+.sheet-question.is-partial { border-color: #ead7a0; background: #fffdf5; }
 .sheet-q-head { display: flex; justify-content: space-between; color: #989dab; font-size: 12px; font-weight: 700; letter-spacing: .6px; }
-.correct-text { color: #3e9a77; }.wrong-text { color: #c55663; }
+.correct-text { color: #3e9a77; }.wrong-text { color: #c55663; }.partial-text { color: #a47721; }
 .pending-text { color: #95833c; }
 .sheet-question h4 { margin: 7px 0; color: #53596a; font-size: 12px; line-height: 1.45; }
 .sheet-answers { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
@@ -367,7 +368,7 @@ input[type=checkbox] { accent-color: var(--purple); }
 .result-message { margin-top: 21px; padding: 13px; border-radius: 8px; color: #4d8a70; background: #f0faf5; font-size: 12px; }
 .student-score { margin: 15px 0 0; padding: 17px; display: flex; flex-direction: column; align-items: center; border: 1px solid #ebe9fa; border-radius: 12px; background: #faf9ff; }.student-score > span { color: #9b96c6; font-size: 12px; font-weight: 700; letter-spacing: 1.2px; }.student-score strong { margin-top: 6px; color: #5549bd; font-family: Manrope, sans-serif; font-size: 32px; }.student-score strong small { color: #a19dbc; font-size: 16px; font-weight: 500; }.student-score p { margin: 4px 0 0; color: #9297a6; font-size: 12px; }
 .student-review { margin: 25px 0; }.review-heading { margin-bottom: 11px; display: flex; align-items: center; justify-content: space-between; }.review-heading h2 { margin: 0; font-family: Manrope, sans-serif; font-size: 14px; }.review-heading span { color: #84899a; font-size: 12px; }
-.review-item { position: relative; margin-top: 9px; padding: 12px; border: 1px solid #ebebf1; border-radius: 9px; }.review-item.is-correct { border-left: 3px solid #55a587; }.review-item.is-wrong { border-left: 3px solid #d16c76; }.review-item-head { display: flex; justify-content: space-between; color: #9a9eaa; font-size: 12px; font-weight: 700; letter-spacing: .7px; }.review-item.is-correct .review-item-head b { color: #499477; }.review-item.is-wrong .review-item-head b { color: #c35b67; }.review-item h3 { margin: 9px 0; color: #454b5d; font-size: 12px; line-height: 1.5; }.review-item p { margin: 5px 0; color: #858b99; font-size: 12px; }.review-item p strong { color: #5a6070; font-weight: 600; }.review-mark { margin-top: 9px; display: block; color: #9095a3; font-size: 12px; }
+.review-item { position: relative; margin-top: 9px; padding: 12px; border: 1px solid #ebebf1; border-radius: 9px; }.review-item.is-correct { border-left: 3px solid #55a587; }.review-item.is-wrong { border-left: 3px solid #d16c76; }.review-item.is-partial { border-left: 3px solid #d2aa4f; }.review-item-head { display: flex; justify-content: space-between; color: #9a9eaa; font-size: 12px; font-weight: 700; letter-spacing: .7px; }.review-item.is-correct .review-item-head b { color: #499477; }.review-item.is-wrong .review-item-head b { color: #c35b67; }.review-item.is-partial .review-item-head b { color: #a47721; }.review-item h3 { margin: 9px 0; color: #454b5d; font-size: 12px; line-height: 1.5; }.review-item p { margin: 5px 0; color: #858b99; font-size: 12px; }.review-item p strong { color: #5a6070; font-weight: 600; }.review-mark { margin-top: 9px; display: block; color: #9095a3; font-size: 12px; }
 .result-card > .button { margin-top: 18px; }
 
 @media (max-width: 900px) {
@@ -840,6 +841,7 @@ body.no-animations {
 }
 .question-type-pill.type-mcq_multi { color: #0f766e; background: #ecfdf5; border-color: #bbf7d0; }
 .question-type-pill.type-true_false { color: #1d4ed8; background: #eff6ff; border-color: #bfdbfe; }
+.question-type-pill.type-yes_no { color: #166534; background: #f0fdf4; border-color: #bbf7d0; }
 .question-type-pill.type-short_answer { color: #9a3412; background: #fff7ed; border-color: #fed7aa; }
 .question-type-pill.type-numeric { color: #0369a1; background: #f0f9ff; border-color: #bae6fd; }
 .question-type-pill.type-matching { color: #7e22ce; background: #faf5ff; border-color: #e9d5ff; }

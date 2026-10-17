@@ -122,6 +122,29 @@ test('MCQ requirements work through the local API and persist in SQLite', { time
     assert.equal(viewedManual.data.id, manualId);
     assert.equal(viewedManual.data.question_type, 'mcq_single');
 
+    const yesNoCreated = await admin('/api/admin/questions', { method: 'POST', body: {
+      question_text: 'Does the Pacific Ocean touch Bangladesh?',
+      question_type: 'yes_no',
+      category: 'Integration QA',
+      answer_key: { correct_answer: 'no' },
+    } });
+    assert.equal(yesNoCreated.status, 201, JSON.stringify(yesNoCreated.data));
+    assert.equal(yesNoCreated.data.question_type, 'yes_no');
+    const yesNoId = yesNoCreated.data.id;
+
+    const multiCreated = await admin('/api/admin/questions', { method: 'POST', body: {
+      question_text: 'Select the prime numbers.',
+      question_type: 'mcq_multi',
+      category: 'Integration QA',
+      question_config: { options: [
+        { id: 'A', text: '2' }, { id: 'B', text: '4' }, { id: 'C', text: '5' }, { id: 'D', text: '9' },
+      ] },
+      answer_key: { correct_options: ['A', 'C'] },
+    } });
+    assert.equal(multiCreated.status, 201, JSON.stringify(multiCreated.data));
+    assert.equal(multiCreated.data.question_type, 'mcq_multi');
+    const multiId = multiCreated.data.id;
+
     // Reject unsupported or malformed question types via API
     assert.equal((await admin('/api/admin/questions', {
       method: 'POST',
@@ -197,6 +220,58 @@ test('MCQ requirements work through the local API and persist in SQLite', { time
     assert.equal(multiSubjectExam.status, 201, 'Exam must accept questions from multiple subjects.');
     assert.equal(multiSubjectExam.data.question_count, 2);
     assert.ok(multiSubjectExam.data.subject.includes('Integration QA') && multiSubjectExam.data.subject.includes('Other Subject'));
+
+    const typeExamCreated = await admin('/api/admin/exams', { method: 'POST', body: {
+      title: 'Binary and multi-select grading exam',
+      duration_minutes: 15,
+      status: 'published',
+      negative_mark: 0.25,
+      show_score: false,
+      show_answers: false,
+      question_ids: [yesNoId, multiId],
+    } });
+    assert.equal(typeExamCreated.status, 201, JSON.stringify(typeExamCreated.data));
+    const typeExamId = typeExamCreated.data.id;
+    const typeIdentity = { student_name: 'Integration Student', email: 'student@example.com', address: 'Dhaka' };
+    const typeAttemptCreated = await anonymous(`/api/exams/${typeExamId}/attempts`, { method: 'POST', body: {
+      ...typeIdentity, roll_number: 'type-42',
+    } });
+    assert.equal(typeAttemptCreated.status, 201, JSON.stringify(typeAttemptCreated.data));
+    const typeToken = typeAttemptCreated.data.token;
+    const activeTypeAttempt = await anonymous(`/api/attempts/${typeToken}`);
+    assert.equal(activeTypeAttempt.status, 200);
+    assert.ok(activeTypeAttempt.data.questions.every((item) => !('answer_key' in item) && !('correct_option' in item)));
+    assert.deepEqual(activeTypeAttempt.data.questions.find((item) => item.id === yesNoId).question_config.options, [
+      { id: 'yes', text: 'Yes' }, { id: 'no', text: 'No' },
+    ]);
+    assert.equal((await anonymous(`/api/attempts/${typeToken}/answers`, { method: 'PUT', body: {
+      question_id: yesNoId, answer_data: { selected_answer: 'yes' },
+    } })).status, 200);
+    assert.equal((await anonymous(`/api/attempts/${typeToken}/answers`, { method: 'PUT', body: {
+      question_id: multiId, answer_data: { selected_options: ['A', 'B', 'C'] },
+    } })).status, 200);
+    const reloadedTypeAttempt = await anonymous(`/api/attempts/${typeToken}`);
+    assert.deepEqual(reloadedTypeAttempt.data.answers.find((answer) => answer.question_id === yesNoId).answer_data, { selected_answer: 'yes' });
+    assert.deepEqual(reloadedTypeAttempt.data.answers.find((answer) => answer.question_id === multiId).answer_data, { selected_options: ['A', 'B', 'C'] });
+    const typeAttemptSubmitted = await anonymous(`/api/attempts/${typeToken}/submit`, { method: 'POST' });
+    assert.ok(!('score' in typeAttemptSubmitted.data.result) && !('answers' in typeAttemptSubmitted.data.result), 'Hidden type-exam results must keep the answer key private.');
+    const typeAttempts = await admin(`/api/admin/exams/${typeExamId}/attempts`);
+    const typeAttempt = typeAttempts.data.find((item) => item.roll_number === 'type-42');
+    assert.equal(typeAttempt.score, 0.5, 'Wrong Yes/No earns zero while multi-select earns deterministic partial credit.');
+    const typeSheet = await admin(`/api/admin/attempts/${typeAttempt.id}`);
+    assert.equal(typeSheet.status, 200);
+    const yesNoAnswer = typeSheet.data.answers.find((answer) => answer.question_id === yesNoId);
+    const multiAnswer = typeSheet.data.answers.find((answer) => answer.question_id === multiId);
+    assert.equal(yesNoAnswer.marks_awarded, 0);
+    assert.equal(yesNoAnswer.answer_key.correct_answer, 'no');
+    assert.equal(multiAnswer.marks_awarded, 0.5);
+    assert.equal(multiAnswer.is_correct, 0);
+
+    assert.equal((await admin(`/api/admin/exams/${typeExamId}/settings`, { method: 'PATCH', body: { show_score: true, show_answers: true } })).status, 200);
+    const visibleTypeResult = await anonymous(`/api/attempts/${typeToken}`);
+    assert.equal(visibleTypeResult.data.result.score, 0.5);
+    assert.equal(visibleTypeResult.data.result.answers.find((answer) => answer.question_id === yesNoId).answer_key.correct_answer, 'no');
+    assert.deepEqual(visibleTypeResult.data.result.answers.find((answer) => answer.question_id === multiId).answer_data, { selected_options: ['A', 'B', 'C'] });
 
     response = await admin('/api/admin/exams', { method: 'POST', body: examBody });
     assert.equal(response.status, 201, JSON.stringify(response.data));

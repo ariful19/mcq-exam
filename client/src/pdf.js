@@ -279,10 +279,14 @@ export function generateResultPdf({ attempt, result, settings = {} }) {
     const isCorrect = Boolean(q.is_correct);
     const isAnswered = isAnswerProvided(q, q.selected_option, q.answer_data);
 
+    const marksAwarded = Number(q.marks_awarded ?? 0);
+    const signedMarks = `${marksAwarded >= 0 ? '+' : ''}${marksAwarded.toFixed(2)}`;
     const statusText = isCorrect
-      ? 'CORRECT (+1.00)'
+      ? `CORRECT (${signedMarks})`
       : isAnswered
-        ? `INCORRECT (${Number(q.marks_awarded ?? 0) < 0 ? Number(q.marks_awarded).toFixed(2) : '-' + Math.abs(Number(q.marks_awarded ?? 0)).toFixed(2)})`
+        ? marksAwarded > 0
+          ? `PARTIAL CREDIT (${signedMarks})`
+          : `INCORRECT (${marksAwarded.toFixed(2)})`
         : 'NOT ANSWERED (0.00)';
 
     doc.setFont('helvetica', 'bold');

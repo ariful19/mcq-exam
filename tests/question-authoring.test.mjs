@@ -18,6 +18,9 @@ import {
   validateQuestionDraft,
   hydrateQuestionRow,
   normalizeQuestion,
+  formatStudentAnswerSummary,
+  formatCorrectAnswerSummary,
+  isAnswerProvided,
 } from '../client/src/question-authoring.js';
 
 const root = path.resolve(import.meta.dirname || path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -149,6 +152,10 @@ test('manual question editor shows only relevant inputs for each supported quest
         present: ['data-type-section="true_false"', 'name="correct_answer"', 'name="true_text"', 'name="false_text"'],
         absent: ['data-type-section="mcq_single"', 'name="option_a"', 'name="option_c"', 'data-type-section="mcq_multi"', 'data-type-section="short_answer"', 'data-type-section="numeric"', 'data-type-section="matching"', 'data-type-section="ordering"'],
       },
+      [QUESTION_TYPES.YES_NO]: {
+        present: ['data-type-section="yes_no"', 'name="yes_no_correct_answer"', 'value=yes', 'value=no'],
+        absent: ['data-type-section="mcq_single"', 'name="option_a"', 'data-type-section="mcq_multi"', 'data-type-section="true_false"', 'data-type-section="short_answer"', 'data-type-section="numeric"', 'data-type-section="matching"', 'data-type-section="ordering"'],
+      },
       [QUESTION_TYPES.SHORT_ANSWER]: {
         present: ['data-type-section="short_answer"', 'name="accepted_answer_0"', 'name="case_sensitive"', 'name="max_length"', 'name="placeholder"'],
         absent: ['data-type-section="mcq_single"', 'name="option_a"', 'data-type-section="mcq_multi"', 'data-type-section="true_false"', 'data-type-section="numeric"', 'name="numeric_tolerance"', 'data-type-section="matching"', 'data-type-section="ordering"'],
@@ -270,7 +277,7 @@ test('type switching preserves common and compatible draft content and asks or w
   }
 });
 
-test('create, preview/view, and edit work across all 7 question types, legacy MCQs, and imported questions', async () => {
+test('create, preview/view, and edit work across all supported question types, legacy MCQs, and imported questions', async () => {
   const { McqApp, cleanup } = await loadMcqAppClass();
   try {
     const app = new McqApp();
@@ -316,6 +323,14 @@ test('create, preview/view, and edit work across all 7 question types, legacy MC
         difficulty: 'Easy',
         answer_key: { correct_answer: true },
         media: { type: 'audio', url: '/assets/sonar.mp3', caption: 'Sonar ping' },
+      },
+      {
+        id: 108,
+        question_text: 'Is water made of hydrogen and oxygen?',
+        question_type: 'yes_no',
+        category: 'Chemistry',
+        difficulty: 'Easy',
+        answer_key: { correct_answer: 'yes' },
       },
       {
         id: 104,
@@ -383,6 +398,7 @@ test('create, preview/view, and edit work across all 7 question types, legacy MC
     assert.ok(adminHtml.includes('Single MCQ'));
     assert.ok(adminHtml.includes('Multi-select'));
     assert.ok(adminHtml.includes('True / False'));
+    assert.ok(adminHtml.includes('Yes / No'));
     assert.ok(adminHtml.includes('Short answer'));
     assert.ok(adminHtml.includes('Numeric'));
     assert.ok(adminHtml.includes('Matching'));
@@ -401,6 +417,10 @@ test('create, preview/view, and edit work across all 7 question types, legacy MC
       const previewModalHtml = renderLitValue(app.renderQuestionPreviewModal());
       assert.ok(previewModalHtml.includes(q.question_text), `Preview modal must show prompt for ${q.question_type}`);
       assert.ok(previewModalHtml.includes(getQuestionTypeMeta(q.question_type).label), `Preview modal must show type label for ${q.question_type}`);
+      if (q.question_type === QUESTION_TYPES.YES_NO) {
+        assert.ok(previewModalHtml.includes('Yes') && previewModalHtml.includes('No'));
+        assert.ok(previewModalHtml.includes('Correct answer'));
+      }
 
       app.editFromPreview(q);
       assert.equal(app.questionFormOpen, true);
@@ -816,10 +836,79 @@ con.close()
     const importedDraft = createQuestionDraft({ id: 999, ...importedTfNorm.question });
     assert.equal(importedDraft.question_type, QUESTION_TYPES.TRUE_FALSE);
     assert.equal(importedDraft.typeData.true_false.correct_answer, false);
+
+    const importedYesNoNorm = normalizeQuestion({
+      Question: 'Does the Pacific Ocean touch Bangladesh?',
+      'Question Type': 'yes_no',
+      'Correct Answer': 'No',
+      Category: 'Imported',
+    });
+    assert.deepEqual(importedYesNoNorm.errors, []);
+    assert.deepEqual(JSON.parse(importedYesNoNorm.question.answer_key), { correct_answer: 'no' });
+    const importedYesNoDraft = createQuestionDraft({ id: 1000, ...importedYesNoNorm.question });
+    assert.equal(importedYesNoDraft.question_type, QUESTION_TYPES.YES_NO);
+    assert.equal(importedYesNoDraft.typeData.yes_no.correct_answer, 'no');
+    const yesNoValidation = validateQuestionDraft(importedYesNoDraft);
+    assert.equal(yesNoValidation.valid, true);
+    assert.deepEqual(JSON.parse(yesNoValidation.question.answer_key), { correct_answer: 'no' });
+
+    const yesNoAnswer = {
+      ...yesNoValidation.question,
+      answer_data: { selected_answer: 'yes' },
+    };
+    assert.equal(isAnswerProvided(yesNoAnswer, null, yesNoAnswer.answer_data), true);
+    assert.equal(formatStudentAnswerSummary(yesNoAnswer), 'Yes');
+    assert.equal(formatCorrectAnswerSummary(yesNoAnswer), 'No');
   } finally {
     globalThis.fetch = originalFetch;
     db?.close?.();
     cleanup();
     fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('student and teacher result reviews label positive partial credit clearly', async () => {
+  const { McqApp, cleanup } = await loadMcqAppClass();
+  try {
+    const app = new McqApp();
+    const answer = {
+      question_id: 1,
+      question_type: QUESTION_TYPES.MCQ_MULTI,
+      question_text: 'Select the correct prime numbers.',
+      answer_data: { selected_options: ['A', 'B', 'D'] },
+      answer_key: { correct_options: ['A', 'B', 'C'] },
+      marks: 6,
+      marks_awarded: 1,
+      is_correct: 0,
+    };
+    app.attempt = {
+      exam_title: 'Mixed exam',
+      student_name: 'Student',
+      questions: [{}],
+      result: { score: 1, answers: [answer] },
+    };
+    const studentReview = renderLitValue(app.renderStudentResult());
+    assert.ok(studentReview.includes('Partial credit'));
+    assert.ok(studentReview.includes('Your answer:'));
+    assert.ok(studentReview.includes('Correct answer:'));
+    assert.ok(studentReview.includes('1 / 6 mark'));
+
+    app.answerSheet = {
+      ...app.attempt,
+      status: 'submitted',
+      score: 1,
+      started_at: '2026-10-17T00:00:00Z',
+      submitted_at: '2026-10-17T00:10:00Z',
+      answers: [answer],
+    };
+    app.resultExam = { negative_mark: 0.25 };
+    const teacherReview = renderLitValue(app.renderAnswerSheet());
+    assert.ok(teacherReview.includes('Partial credit'));
+    assert.ok(teacherReview.includes('is-partial'));
+    assert.ok(teacherReview.includes('Student response:'));
+    assert.ok(teacherReview.includes('Correct answer:'));
+    assert.ok(teacherReview.includes('Exam penalty:'));
+  } finally {
+    cleanup();
   }
 });

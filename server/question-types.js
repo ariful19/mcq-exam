@@ -2,6 +2,7 @@ export const QUESTION_TYPES = Object.freeze({
   MCQ_SINGLE: 'mcq_single',
   MCQ_MULTI: 'mcq_multi',
   TRUE_FALSE: 'true_false',
+  YES_NO: 'yes_no',
   SHORT_ANSWER: 'short_answer',
   NUMERIC: 'numeric',
   MATCHING: 'matching',
@@ -31,6 +32,12 @@ export const QUESTION_TYPE_META = Object.freeze({
     label: 'True / False',
     shortLabel: 'True / False',
     description: 'Statement where either True or False is the correct answer.',
+  }),
+  [QUESTION_TYPES.YES_NO]: Object.freeze({
+    id: QUESTION_TYPES.YES_NO,
+    label: 'Yes / No',
+    shortLabel: 'Yes / No',
+    description: 'Binary question with a teacher-selected Yes or No answer.',
   }),
   [QUESTION_TYPES.SHORT_ANSWER]: Object.freeze({
     id: QUESTION_TYPES.SHORT_ANSWER,
@@ -415,6 +422,38 @@ export function normalizeQuestion(input = {}) {
     correctOption = '';
     normalizedConfig = { options };
     normalizedAnswerKey = { correct_answer: boolAnswer };
+  } else if (questionType === QUESTION_TYPES.YES_NO) {
+    let options = [
+      { id: 'yes', text: 'Yes' },
+      { id: 'no', text: 'No' },
+    ];
+    if (configInput.options !== undefined) {
+      const { options: validatedOpts, errors: optErrors } = validateOptionsList(configInput.options, {
+        minCount: 2,
+        maxCount: 2,
+        exactIds: ['yes', 'no'],
+      });
+      errors.push(...optErrors);
+      if (!optErrors.length) options = validatedOpts;
+    }
+
+    let rawCorrect = answerKeyInput.correct_answer ?? input.correct_answer;
+    if (rawCorrect === undefined) {
+      const fallbackAnswer = String(input.correct_option ?? input['Correct Answer'] ?? '').trim();
+      if (fallbackAnswer) rawCorrect = fallbackAnswer;
+    }
+    const correctAnswer = typeof rawCorrect === 'string' ? rawCorrect.trim().toLowerCase() : '';
+    if (!['yes', 'no'].includes(correctAnswer)) {
+      errors.push('yes_no requires answer_key.correct_answer to be "yes" or "no".');
+    }
+
+    optionA = options[0]?.text || 'Yes';
+    optionB = options[1]?.text || 'No';
+    optionC = '';
+    optionD = '';
+    correctOption = '';
+    normalizedConfig = { options };
+    normalizedAnswerKey = { correct_answer: ['yes', 'no'].includes(correctAnswer) ? correctAnswer : null };
   } else if (questionType === QUESTION_TYPES.SHORT_ANSWER) {
     let rawAccepted = answerKeyInput.accepted_answers ?? input.accepted_answers;
     if (rawAccepted === undefined) {
@@ -764,6 +803,22 @@ export function validateStudentAnswer(questionRow, body = {}) {
     return { selected_option: null, answer_data: answerData, answerDataJson: JSON.stringify(answerData), error: null };
   }
 
+  if (qType === QUESTION_TYPES.YES_NO) {
+    if ((hasAnswerData && dataObj === null) || (!hasAnswerData && (body.selected_option === null || body.selected_option === ''))) {
+      return { selected_option: null, answer_data: null, answerDataJson: null, error: null };
+    }
+    const rawValue = dataObj?.selected_answer !== undefined ? dataObj.selected_answer : (body.selected_answer ?? body.selected_option);
+    if (rawValue === null || rawValue === '') {
+      return { selected_option: null, answer_data: null, answerDataJson: null, error: null };
+    }
+    const selectedAnswer = typeof rawValue === 'string' ? rawValue.trim().toLowerCase() : '';
+    if (!['yes', 'no'].includes(selectedAnswer)) {
+      return { selected_option: null, answer_data: null, answerDataJson: null, error: 'Choose Yes or No.' };
+    }
+    const answerData = { selected_answer: selectedAnswer };
+    return { selected_option: null, answer_data: answerData, answerDataJson: JSON.stringify(answerData), error: null };
+  }
+
   if (qType === QUESTION_TYPES.SHORT_ANSWER) {
     if ((hasAnswerData && dataObj === null) || (!hasAnswerData && (body.selected_option === null || body.selected_option === ''))) {
       return { selected_option: null, answer_data: null, answerDataJson: null, error: null };
@@ -874,6 +929,7 @@ export function validateStudentAnswer(questionRow, body = {}) {
 export function evaluateQuestionAnswer(questionRow, answerRow, negativeMark = 0) {
   const hydratedQuestion = hydrateQuestionRow(questionRow, { includeAnswerKey: true });
   const qType = hydratedQuestion.question_type;
+  const qConfig = hydratedQuestion.question_config || {};
   const answerKey = hydratedQuestion.answer_key || {};
   const marks = Number(hydratedQuestion.marks ?? 1);
   const penalty = Number(negativeMark || 0);
@@ -901,10 +957,20 @@ export function evaluateQuestionAnswer(questionRow, answerRow, negativeMark = 0)
     const expected = Array.isArray(answerKey.correct_options) ? answerKey.correct_options : [];
     const normSelected = [...new Set(selected.map((s) => String(s).toUpperCase()))].sort();
     const normExpected = [...new Set(expected.map((s) => String(s).toUpperCase()))].sort();
-    const isCorrect = normSelected.length > 0 &&
-      normSelected.length === normExpected.length &&
-      normSelected.every((val, idx) => val === normExpected[idx]);
-    return { answered: true, isCorrect, marksAwarded: isCorrect ? marks : -penalty };
+    const correctSet = new Set(normExpected);
+    const selectedSet = new Set(normSelected);
+    const correctSelections = normSelected.filter((value) => correctSet.has(value)).length;
+    const incorrectSelections = normSelected.length - correctSelections;
+    const incorrectOptionCount = Math.max(0, (qConfig.options || []).length - normExpected.length);
+    const correctShare = normExpected.length > 0 ? correctSelections / normExpected.length : 0;
+    const incorrectShare = incorrectOptionCount > 0 ? incorrectSelections / incorrectOptionCount : 0;
+    const earnedShare = normExpected.length > 0
+      ? Math.max(0, Math.min(1, correctShare - incorrectShare))
+      : 0;
+    const isCorrect = normSelected.length === normExpected.length &&
+      normExpected.every((value) => selectedSet.has(value));
+    const marksAwarded = Number((marks * earnedShare).toFixed(12));
+    return { answered: true, isCorrect, marksAwarded };
   }
 
   if (qType === QUESTION_TYPES.TRUE_FALSE) {
@@ -913,6 +979,14 @@ export function evaluateQuestionAnswer(questionRow, answerRow, negativeMark = 0)
     if (!answered) return { answered: false, isCorrect: false, marksAwarded: 0 };
     const isCorrect = selected === Boolean(answerKey.correct_answer);
     return { answered: true, isCorrect, marksAwarded: isCorrect ? marks : -penalty };
+  }
+
+  if (qType === QUESTION_TYPES.YES_NO) {
+    const selected = answerData?.selected_answer;
+    const answered = selected === 'yes' || selected === 'no';
+    if (!answered) return { answered: false, isCorrect: false, marksAwarded: 0 };
+    const isCorrect = selected === answerKey.correct_answer;
+    return { answered: true, isCorrect, marksAwarded: isCorrect ? marks : 0 };
   }
 
   if (qType === QUESTION_TYPES.SHORT_ANSWER) {
@@ -1061,7 +1135,8 @@ export function migrateSqliteDatabase(db) {
   // Check if questions table needs constraint upgrade (legacy table had strict CHECK (correct_option IN ('A','B','C','D')) without question_type condition)
   const tableMaster = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='questions'").get();
   const tableSql = String(tableMaster?.sql || '');
-  const needsTableRebuild = !tableSql.includes('questions_type_check') && !tableSql.includes("question_type = 'mcq_single'");
+  const hasQuestionTypeConstraint = tableSql.includes('questions_type_check') || /CHECK\s*\(\s*question_type\s+IN/i.test(tableSql);
+  const needsTableRebuild = !hasQuestionTypeConstraint || !tableSql.includes("'yes_no'");
 
   if (needsTableRebuild) {
     db.pragma('foreign_keys = OFF');
@@ -1085,7 +1160,7 @@ export function migrateSqliteDatabase(db) {
             difficulty TEXT NOT NULL DEFAULT '',
             explanation TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            CONSTRAINT questions_type_check CHECK (question_type IN ('mcq_single','mcq_multi','true_false','short_answer','numeric','matching','ordering')),
+            CONSTRAINT questions_type_check CHECK (question_type IN ('mcq_single','mcq_multi','true_false','yes_no','short_answer','numeric','matching','ordering')),
             CONSTRAINT questions_correct_option_check CHECK ((question_type = 'mcq_single' AND correct_option IN ('A','B','C','D')) OR (question_type != 'mcq_single' AND (correct_option = '' OR correct_option IN ('A','B','C','D'))))
           );
           INSERT INTO __new_questions (
