@@ -1646,11 +1646,25 @@ export class McqApp extends LitElement {
       </fieldset>`;
     }
 
+    if (qType === 'yes_no') {
+      const correct = td.correct_answer || 'yes';
+      return html`<fieldset class="type-fieldset" data-type-section="yes_no">
+        <legend>Yes / No answer key</legend>
+        <small class="field-help">Choose the correct response for this question.</small>
+        <div class="tf-toggle-row" role="radiogroup" aria-label="Correct Yes or No answer">
+          ${[{ id: 'yes', text: 'Yes' }, { id: 'no', text: 'No' }].map((option) => html`<label class="tf-choice-card ${correct === option.id ? 'selected' : ''}">
+            <input type="radio" name="yes_no_correct_answer" value=${option.id} style="width:auto;min-height:auto;padding:0;border:0;box-shadow:none" .checked=${correct === option.id} @change=${() => { td.correct_answer = option.id; this.requestUpdate(); }} />
+            <span><b>${option.text}</b></span>
+          </label>`)}
+        </div>
+      </fieldset>`;
+    }
+
     if (qType === QUESTION_TYPES.MCQ_MULTI) {
       return html`<fieldset class="type-fieldset" data-type-section="mcq_multi">
         <legend>Multiple-select options & answer key</legend>
         <div class="type-section-head">
-          <small class="field-help">Provide 2 to 8 options and check every correct option (students must match all checked options).</small>
+          <small class="field-help">Provide 2 to 8 options and check every correct option. Partial credit is the correct selections ÷ correct options minus incorrect selections ÷ incorrect options, multiplied by the question marks (minimum zero, capped at full marks). If there are no incorrect options, there is no incorrect-selection deduction. No exam negative-mark penalty applies.</small>
           <button type="button" class="button button-outline button-small" ?disabled=${td.options.length >= 8} @click=${() => { addMcqMultiOption(draft); this.requestUpdate(); }}>＋ Add option</button>
         </div>
         <div class="dynamic-item-list">
@@ -1946,6 +1960,15 @@ export class McqApp extends LitElement {
         </div>
       ` : ''}
 
+      ${qType === QUESTION_TYPES.YES_NO ? html`
+        <div class="selection-option-grid preview-options-grid">
+          ${(d.options || []).map((opt) => html`<span class=${opt.isCorrect ? 'selection-correct-option' : ''}>
+            <strong>${opt.text}</strong>
+            ${opt.isCorrect ? html` <b class="correct-answer-label">✓ Correct answer</b>` : ''}
+          </span>`)}
+        </div>
+      ` : ''}
+
       ${qType === QUESTION_TYPES.FILL_BLANK ? html`
         <div class="preview-structured-box">
           <div class="preview-blanks-list">
@@ -2180,11 +2203,12 @@ export class McqApp extends LitElement {
   renderAnswerSheet() {
     const sheet = this.answerSheet;
     const graded = sheet.status !== 'in_progress';
-    return html`<div class="answer-sheet"><div class="sheet-header"><div><button class="back-link compact-back" @click=${() => { this.answerSheet = null; this.requestUpdate(); }}>← Participants</button><h3>${sheet.student_name}<span> · Roll ${sheet.roll_number}</span></h3><p>${sheet.exam_title} · ${sheet.email || 'No email provided'} · ${sheet.address || 'No address provided'}</p></div><div class="sheet-score"><b>${sheet.score}</b><small>FINAL SCORE</small></div></div><div class="sheet-controls"><button class="button button-outline button-small" @click=${() => this.downloadResultPdf(sheet)}>↓ Download PDF</button><button class="button button-danger button-small" @click=${() => this.deleteAttempt(sheet)}>Delete result sheet</button></div><div class="sheet-meta"><span class="status-tag ${sheet.status}">${sheet.status.replace('_', ' ')}</span><span>Penalty: −${Number(this.resultExam?.negative_mark || 0)} for wrong answers</span><span>Started ${this.formatDate(sheet.started_at)}</span><span>${sheet.submitted_at ? `Submitted ${this.formatDate(sheet.submitted_at)}` : 'Not submitted'}</span></div>
+    return html`<div class="answer-sheet"><div class="sheet-header"><div><button class="back-link compact-back" @click=${() => { this.answerSheet = null; this.requestUpdate(); }}>← Participants</button><h3>${sheet.student_name}<span> · Roll ${sheet.roll_number}</span></h3><p>${sheet.exam_title} · ${sheet.email || 'No email provided'} · ${sheet.address || 'No address provided'}</p></div><div class="sheet-score"><b>${sheet.score}</b><small>FINAL SCORE</small></div></div><div class="sheet-controls"><button class="button button-outline button-small" @click=${() => this.downloadResultPdf(sheet)}>↓ Download PDF</button><button class="button button-danger button-small" @click=${() => this.deleteAttempt(sheet)}>Delete result sheet</button></div><div class="sheet-meta"><span class="status-tag ${sheet.status}">${sheet.status.replace('_', ' ')}</span><span>Exam penalty: −${Number(this.resultExam?.negative_mark || 0)} where applicable</span><span>Started ${this.formatDate(sheet.started_at)}</span><span>${sheet.submitted_at ? `Submitted ${this.formatDate(sheet.submitted_at)}` : 'Not submitted'}</span></div>
       <div class="sheet-questions">${sheet.answers.map((answer, index) => {
         const qType = answer.question_type || DEFAULT_QUESTION_TYPE;
         const answered = isAnswerProvided(answer, answer.selected_option, answer.answer_data);
-        return html`<article class="sheet-question ${graded ? answer.is_correct ? 'is-correct' : 'is-wrong' : 'is-pending'}"><div class="sheet-q-head"><span>QUESTION ${String(index + 1).padStart(2, '0')} · ${formatQuestionTypeBadge(answer).shortLabel.toUpperCase()}</span><span class=${graded ? answer.is_correct ? 'correct-text' : 'wrong-text' : 'pending-text'}>${graded ? answer.is_correct ? '✓ Correct' : answered ? '× Incorrect' : 'Not answered' : 'Not graded'}</span></div><h4>${unsafeHTML(renderQuestionText(answer.question_text))}</h4>
+        const partial = graded && !answer.is_correct && answered && Number(answer.marks_awarded) > 0;
+        return html`<article class="sheet-question ${graded ? answer.is_correct ? 'is-correct' : partial ? 'is-partial' : answered ? 'is-wrong' : 'is-pending' : 'is-pending'}"><div class="sheet-q-head"><span>QUESTION ${String(index + 1).padStart(2, '0')} · ${formatQuestionTypeBadge(answer).shortLabel.toUpperCase()}</span><span class=${graded ? answer.is_correct ? 'correct-text' : partial ? 'partial-text' : answered ? 'wrong-text' : 'pending-text' : 'pending-text'}>${graded ? answer.is_correct ? '✓ Correct' : partial ? 'Partial credit' : answered ? '× Incorrect' : 'Not answered' : 'Not graded'}</span></div><h4>${unsafeHTML(renderQuestionText(answer.question_text))}</h4>
           ${qType === QUESTION_TYPES.MCQ_SINGLE
             ? html`<div class="sheet-answers">${letters.map((letter) => html`<div class="sheet-option ${letter === answer.correct_option ? 'right-option' : ''} ${graded && letter === answer.selected_option && !answer.is_correct ? 'chosen-wrong' : ''}"><span>${letter}</span><span>${answer[optionKeys[letter]]}</span>${letter === answer.selected_option ? html`<small class="student-label">STUDENT</small>` : ''}${letter === answer.correct_option ? html`<small>CORRECT</small>` : ''}</div>`)}</div>`
             : html`<div class="sheet-non-mcq-review"><p><b>Student response:</b> ${formatStudentAnswerSummary(answer)}</p><p><b>Correct answer:</b> ${formatCorrectAnswerSummary(answer)}</p></div>`}
@@ -2202,7 +2226,7 @@ export class McqApp extends LitElement {
   }
 
   renderStartDialog() {
-    return html`<div class="modal-backdrop" @click=${(event) => { if (event.target === event.currentTarget) this.dismissStart(); }}><section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="start-title"><button class="icon-close modal-close" @click=${this.dismissStart}>×</button><span class="eyebrow muted">BEFORE YOU BEGIN</span><h2 id="start-title">${this.startingExam.title}</h2><p class="modal-intro">${this.startingExam.question_count} questions · ${this.startingExam.duration_minutes} minutes. Enter your details to begin.</p><div class="start-reminder"><span>◷</span><span>${this.startingExam.loadingDetails ? 'Loading the exam scoring rule…' : `Your timer starts as soon as you begin. A wrong answer loses ${Number(this.startingExam.negative_mark || 0)} mark; unanswered questions receive no penalty.`}</span></div><form class="stack-form" @submit=${this.startExam}><label>Full name<input name="student_name" required maxlength="120" autocomplete="name" placeholder="Your name" /></label><label>Email<input name="email" type="email" required maxlength="254" autocomplete="email" placeholder="you@example.com" /></label><label>Address<input name="address" required maxlength="500" autocomplete="street-address" placeholder="Your address" /></label><label>Roll number<input name="roll_number" required maxlength="60" placeholder="Your roll number" /></label><button class="button button-primary button-full" ?disabled=${this.busy || this.startingExam.loadingDetails}>${this.startingExam.loadingDetails ? 'Loading exam…' : this.busy ? 'Preparing your exam…' : 'Begin examination'} <span>→</span></button></form><button class="text-button modal-cancel" @click=${this.dismissStart}>Maybe later</button></section></div>`;
+    return html`<div class="modal-backdrop" @click=${(event) => { if (event.target === event.currentTarget) this.dismissStart(); }}><section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="start-title"><button class="icon-close modal-close" @click=${this.dismissStart}>×</button><span class="eyebrow muted">BEFORE YOU BEGIN</span><h2 id="start-title">${this.startingExam.title}</h2><p class="modal-intro">${this.startingExam.question_count} questions · ${this.startingExam.duration_minutes} minutes. Enter your details to begin.</p><div class="start-reminder"><span>◷</span><span>${this.startingExam.loadingDetails ? 'Loading the exam scoring rule…' : `Your timer starts as soon as you begin. Wrong answers lose ${Number(this.startingExam.negative_mark || 0)} mark where applicable; Yes/No and multi-select questions use their own scoring rules. Unanswered questions receive no penalty.`}</span></div><form class="stack-form" @submit=${this.startExam}><label>Full name<input name="student_name" required maxlength="120" autocomplete="name" placeholder="Your name" /></label><label>Email<input name="email" type="email" required maxlength="254" autocomplete="email" placeholder="you@example.com" /></label><label>Address<input name="address" required maxlength="500" autocomplete="street-address" placeholder="Your address" /></label><label>Roll number<input name="roll_number" required maxlength="60" placeholder="Your roll number" /></label><button class="button button-primary button-full" ?disabled=${this.busy || this.startingExam.loadingDetails}>${this.startingExam.loadingDetails ? 'Loading exam…' : this.busy ? 'Preparing your exam…' : 'Begin examination'} <span>→</span></button></form><button class="text-button modal-cancel" @click=${this.dismissStart}>Maybe later</button></section></div>`;
   }
 
   renderSubmitConfirmDialog() {
@@ -2255,11 +2279,11 @@ export class McqApp extends LitElement {
       return html`
         <p class="question-hint">Select one answer to continue</p>
         <div class="answer-options">
-          ${letters.map((letter) => html`<button class="answer-option ${this.answers[question.id] === letter ? 'selected' : ''}" @click=${() => this.selectAnswer(question, letter)}>
-            <span class="option-letter">${letter}</span>
+          ${letters.map((letter) => html`<label class="answer-option ${this.answers[question.id] === letter ? 'selected' : ''}">
+            <input type="radio" name=${`answer_${question.id}`} value=${letter} aria-label=${`Option ${letter}`} style="width:auto;min-height:auto;padding:0;border:0;box-shadow:none" .checked=${this.answers[question.id] === letter} @change=${() => this.selectAnswer(question, letter)} />
             <span class="option-text">${unsafeHTML(sanitizeRichText(question[optionKeys[letter]] || (qConfig.options || []).find((o) => o.id === letter)?.text || ''))}</span>
             <span class="option-radio">${this.answers[question.id] === letter ? html`<i></i>` : ''}</span>
-          </button>`)}
+          </label>`)}
         </div>
       `;
     }
@@ -2273,17 +2297,19 @@ export class McqApp extends LitElement {
         <div class="answer-options">
           ${options.map((opt) => {
             const isSelected = selectedSet.has(opt.id);
-            return html`<button type="button" class="answer-option ${isSelected ? 'selected' : ''}" aria-pressed=${String(isSelected)} @click=${() => {
+            const atMax = Number(qConfig.max_selections) > 0 && selectedList.length >= Number(qConfig.max_selections);
+            return html`<label class="answer-option ${isSelected ? 'selected' : ''}">
+              <input type="checkbox" name=${`answer_${question.id}`} value=${opt.id} aria-label=${`Option ${opt.id}: ${opt.text}`} .checked=${isSelected} ?disabled=${!isSelected && atMax} @change=${(event) => {
               const nextSet = new Set(selectedSet);
-              if (nextSet.has(opt.id)) nextSet.delete(opt.id);
-              else nextSet.add(opt.id);
+              if (event.target.checked) nextSet.add(opt.id);
+              else nextSet.delete(opt.id);
               const nextOptions = options.map((o) => o.id).filter((id) => nextSet.has(id));
               this.saveStructuredAnswer(question, nextOptions.length ? { selected_options: nextOptions } : null);
             }}>
               <span class="option-letter">${opt.id}</span>
               <span class="option-text">${unsafeHTML(sanitizeRichText(opt.text))}</span>
               <span class="option-radio">${isSelected ? html`<i></i>` : ''}</span>
-            </button>`;
+            </label>`;
           })}
         </div>
       `;
@@ -2308,6 +2334,21 @@ export class McqApp extends LitElement {
               <span class="option-radio">${isSelected ? html`<i></i>` : ''}</span>
             </button>`;
           })}
+        </div>
+      `;
+    }
+
+    if (qType === QUESTION_TYPES.YES_NO || qType === 'yes_no') {
+      const selectedAnswer = currentData.selected_answer;
+      const options = [{ id: 'yes', text: 'Yes' }, { id: 'no', text: 'No' }];
+      return html`
+        <p class="question-hint">Select Yes or No</p>
+        <div class="answer-options">
+          ${options.map((option) => html`<label class="answer-option ${selectedAnswer === option.id ? 'selected' : ''}">
+            <input type="radio" name=${`answer_${question.id}`} value=${option.id} aria-label=${option.text} style="width:auto;min-height:auto;padding:0;border:0;box-shadow:none" .checked=${selectedAnswer === option.id} @change=${() => this.saveStructuredAnswer(question, { selected_answer: option.id })} />
+            <span class="option-text">${option.text}</span>
+            <span class="option-radio">${selectedAnswer === option.id ? html`<i></i>` : ''}</span>
+          </label>`)}
         </div>
       `;
     }
@@ -2488,7 +2529,8 @@ export class McqApp extends LitElement {
       ${Object.hasOwn(result, 'score') ? html`<div class="student-score"><span>YOUR SCORE</span><strong>${result.score}<small> / ${this.attempt.questions.length}</small></strong><p>${result.status === 'auto_submitted' ? 'Submitted automatically when time expired' : 'Your examination has been submitted'}</p></div>` : ''}
       ${reviewed.length ? html`<div class="student-review"><div class="review-heading"><h2>Answer review</h2><span>${reviewed.filter((answer) => answer.is_correct).length} of ${reviewed.length} correct</span></div>${reviewed.map((answer, index) => {
         const answered = isAnswerProvided(answer, answer.selected_option, answer.answer_data);
-        return html`<article class="review-item ${answer.is_correct ? 'is-correct' : 'is-wrong'}"><div class="review-item-head"><span>QUESTION ${String(index + 1).padStart(2, '0')}</span><b>${answer.is_correct ? '✓ Correct' : answered ? '× Incorrect' : 'Not answered'}</b></div><h3>${unsafeHTML(renderQuestionText(answer.question_text))}</h3><p>Your answer: <strong>${formatStudentAnswerSummary(answer)}</strong></p><p>Correct answer: <strong>${formatCorrectAnswerSummary(answer)}</strong></p>${answer.explanation ? html`<p class="answer-explanation"><b>Explanation</b> ${unsafeHTML(sanitizeRichText(answer.explanation))}</p>` : ''}<span class="review-mark">${answer.marks_awarded ?? 0} / ${answer.marks} mark</span></article>`;
+        const partial = !answer.is_correct && answered && Number(answer.marks_awarded) > 0;
+        return html`<article class="review-item ${answer.is_correct ? 'is-correct' : partial ? 'is-partial' : answered ? 'is-wrong' : 'is-pending'}"><div class="review-item-head"><span>QUESTION ${String(index + 1).padStart(2, '0')}</span><b>${answer.is_correct ? '✓ Correct' : partial ? 'Partial credit' : answered ? '× Incorrect' : 'Not answered'}</b></div><h3>${unsafeHTML(renderQuestionText(answer.question_text))}</h3><p>Your answer: <strong>${formatStudentAnswerSummary(answer)}</strong></p><p>Correct answer: <strong>${formatCorrectAnswerSummary(answer)}</strong></p>${answer.explanation ? html`<p class="answer-explanation"><b>Explanation</b> ${unsafeHTML(sanitizeRichText(answer.explanation))}</p>` : ''}<span class="review-mark">${answer.marks_awarded ?? 0} / ${answer.marks} mark</span></article>`;
       })}</div>` : ''}
       ${(result.allow_pdf_download || this.attempt?.allow_pdf_download) && reviewed.length ? html`<div class="result-download-section"><button class="button button-outline button-full download-pdf-btn" @click=${() => this.downloadResultPdf()}>↓ Download result as PDF</button></div>` : ''}
       <button class="button button-primary button-full" @click=${this.newAttempt}>Return to examinations <span>→</span></button>

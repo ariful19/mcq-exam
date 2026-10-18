@@ -43,6 +43,13 @@
       "when": 1791000000000,
       "tag": "0005_extensible_question_types",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1792195200000,
+      "tag": "0006_yes_no_question_type",
+      "breakpoints": true
     }
   ]
 }

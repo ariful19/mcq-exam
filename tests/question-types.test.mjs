@@ -145,6 +145,7 @@ test('stable question-type identifiers and legacy MCQ normalization work lossles
     'mcq_single',
     'mcq_multi',
     'true_false',
+    'yes_no',
     'fill_blank',
     'short_answer',
     'numeric',
@@ -226,7 +227,21 @@ test('all extensible question types validate configuration, answer keys, and opt
   assert.equal(tf.question.question_type, 'true_false');
   assert.deepEqual(JSON.parse(tf.question.answer_key), { correct_answer: true });
 
-  // 3. short_answer (deterministic, no AI/NLP)
+  // 3. yes_no keeps its binary Yes/No semantics distinct from True/False
+  const yesNo = normalizeQuestion({
+    question_text: 'Is Dhaka the capital of Bangladesh?',
+    question_type: 'yes_no',
+    category: 'Bangladesh',
+    answer_key: { correct_answer: 'No' },
+  });
+  assert.deepEqual(yesNo.errors, []);
+  assert.equal(yesNo.question.question_type, 'yes_no');
+  assert.deepEqual(JSON.parse(yesNo.question.question_config), {
+    options: [{ id: 'yes', text: 'Yes' }, { id: 'no', text: 'No' }],
+  });
+  assert.deepEqual(JSON.parse(yesNo.question.answer_key), { correct_answer: 'no' });
+
+  // 4. short_answer (deterministic, no AI/NLP)
   const shortAns = normalizeQuestion({
     question_text: 'What is the chemical symbol for gold?',
     question_type: 'short_answer',
@@ -241,7 +256,7 @@ test('all extensible question types validate configuration, answer keys, and opt
     case_sensitive: true,
   });
 
-  // 4. numeric (with tolerance)
+  // 5. numeric (with tolerance)
   const numQ = normalizeQuestion({
     question_text: 'Approximate pi to two decimal places.',
     question_type: 'numeric',
@@ -253,7 +268,7 @@ test('all extensible question types validate configuration, answer keys, and opt
   assert.equal(numQ.question.question_type, 'numeric');
   assert.deepEqual(JSON.parse(numQ.question.answer_key), { value: 3.14, tolerance: 0.005 });
 
-  // 5. matching
+  // 6. matching
   const matchingQ = normalizeQuestion({
     question_text: 'Match each country with its capital city.',
     question_type: 'matching',
@@ -274,7 +289,7 @@ test('all extensible question types validate configuration, answer keys, and opt
   assert.deepEqual(matchingQ.errors, []);
   assert.equal(matchingQ.question.question_type, 'matching');
 
-  // 6. ordering
+  // 7. ordering
   const orderingQ = normalizeQuestion({
     question_text: 'Arrange these planets from closest to farthest from the Sun.',
     question_type: 'ordering',
@@ -388,12 +403,16 @@ test('mixed question-type exam grading, student answer validation, and active at
   }).question };
   const qMulti = { id: 2, marks: 2, ...normalizeQuestion({
     question_text: 'Multi?', question_type: 'mcq_multi', category: 'Gen',
-    question_config: { options: [{ id: 'A', text: '1' }, { id: 'B', text: '2' }, { id: 'C', text: '3' }] },
+    question_config: { options: [{ id: 'A', text: '1' }, { id: 'B', text: '2' }, { id: 'C', text: '3' }, { id: 'D', text: '4' }] },
     answer_key: { correct_options: ['A', 'C'] },
   }).question };
   const qTf = { id: 3, marks: 1, ...normalizeQuestion({
     question_text: 'TF?', question_type: 'true_false', category: 'Gen',
     answer_key: { correct_answer: false },
+  }).question };
+  const qYesNo = { id: 8, marks: 1, ...normalizeQuestion({
+    question_text: 'Is Dhaka the capital of Bangladesh?', question_type: 'yes_no', category: 'Gen',
+    answer_key: { correct_answer: 'no' },
   }).question };
   const qShort = { id: 4, marks: 1.5, ...normalizeQuestion({
     question_text: 'Short?', question_type: 'short_answer', category: 'Gen',
@@ -418,7 +437,7 @@ test('mixed question-type exam grading, student answer validation, and active at
   }).question };
 
   // Active exam hydration strips answer_key, correct_option, and explanation
-  for (const q of [qMcq, qMulti, qTf, qShort, qNum, qMatch, qOrder]) {
+  for (const q of [qMcq, qMulti, qTf, qYesNo, qShort, qNum, qMatch, qOrder]) {
     const publicView = hydrateQuestionRow(q, { includeAnswerKey: false });
     assert.ok(!('correct_option' in publicView));
     assert.ok(!('answer_key' in publicView));
@@ -443,10 +462,65 @@ test('mixed question-type exam grading, student answer validation, and active at
     answered: true, isCorrect: true, marksAwarded: 2,
   });
 
+  const partialMulti = validateStudentAnswer(qMulti, { answer_data: { selected_options: ['A'] } });
+  assert.deepEqual(evaluateQuestionAnswer(qMulti, { answer_data: partialMulti.answerDataJson }, penalty), {
+    answered: true, isCorrect: false, marksAwarded: 1,
+  });
+
+  const wrongWithPartial = validateStudentAnswer(qMulti, { answer_data: { selected_options: ['A', 'B', 'C'] } });
+  assert.deepEqual(evaluateQuestionAnswer(qMulti, { answer_data: wrongWithPartial.answerDataJson }, penalty), {
+    answered: true, isCorrect: false, marksAwarded: 1,
+  });
+
+  const qFraction = { id: 10, marks: 6, ...normalizeQuestion({
+    question_text: 'Choose three of five.', question_type: 'mcq_multi', category: 'Gen',
+    question_config: { options: ['A', 'B', 'C', 'D', 'E'].map((id) => ({ id, text: id })) },
+    answer_key: { correct_options: ['A', 'B', 'C'] },
+  }).question };
+  const mixedFraction = validateStudentAnswer(qFraction, { answer_data: { selected_options: ['A', 'B', 'D'] } });
+  assert.deepEqual(evaluateQuestionAnswer(qFraction, { answer_data: mixedFraction.answerDataJson }, penalty), {
+    answered: true, isCorrect: false, marksAwarded: 1,
+  }, 'mixed right/wrong selections produce stable partial marks without floating-point artifacts');
+
+  const someRightSomeWrong = validateStudentAnswer(qMulti, { answer_data: { selected_options: ['A', 'B'] } });
+  assert.deepEqual(evaluateQuestionAnswer(qMulti, { answer_data: someRightSomeWrong.answerDataJson }, penalty), {
+    answered: true, isCorrect: false, marksAwarded: 0,
+  });
+
+  const allMultiOptions = validateStudentAnswer(qMulti, { answer_data: { selected_options: ['A', 'B', 'C', 'D'] } });
+  assert.deepEqual(evaluateQuestionAnswer(qMulti, { answer_data: allMultiOptions.answerDataJson }, penalty), {
+    answered: true, isCorrect: false, marksAwarded: 0,
+  }, 'selecting every option earns no credit and does not also take an exam-level penalty');
+
+  const noneMultiOptions = validateStudentAnswer(qMulti, { answer_data: null });
+  assert.deepEqual(evaluateQuestionAnswer(qMulti, { answer_data: noneMultiOptions.answerDataJson }, penalty), {
+    answered: false, isCorrect: false, marksAwarded: 0,
+  });
+
+  const qAllOptionsCorrect = { id: 9, marks: 3, ...normalizeQuestion({
+    question_text: 'Select the two prime numbers shown.', question_type: 'mcq_multi', category: 'Gen',
+    question_config: { options: [{ id: 'A', text: '2' }, { id: 'B', text: '3' }] },
+    answer_key: { correct_options: ['A', 'B'] },
+  }).question };
+  const allCorrectOptions = validateStudentAnswer(qAllOptionsCorrect, { answer_data: { selected_options: ['A', 'B'] } });
+  assert.deepEqual(evaluateQuestionAnswer(qAllOptionsCorrect, { answer_data: allCorrectOptions.answerDataJson }, penalty), {
+    answered: true, isCorrect: true, marksAwarded: 3,
+  }, 'when every option is correct, there is no incorrect-option deduction');
+
   const ans3Wrong = validateStudentAnswer(qTf, { answer_data: { selected_answer: true } });
   assert.deepEqual(evaluateQuestionAnswer(qTf, { selected_option: ans3Wrong.selected_option, answer_data: ans3Wrong.answerDataJson }, penalty), {
     answered: true, isCorrect: false, marksAwarded: -0.25,
   });
+
+  const wrongYesNo = validateStudentAnswer(qYesNo, { answer_data: { selected_answer: 'yes' } });
+  assert.deepEqual(evaluateQuestionAnswer(qYesNo, { answer_data: wrongYesNo.answerDataJson }, penalty), {
+    answered: true, isCorrect: false, marksAwarded: 0,
+  }, 'Yes/No grading is full or zero and ignores exam negative marks');
+  const correctYesNo = validateStudentAnswer(qYesNo, { answer_data: { selected_answer: 'no' } });
+  assert.deepEqual(evaluateQuestionAnswer(qYesNo, { answer_data: correctYesNo.answerDataJson }, penalty), {
+    answered: true, isCorrect: true, marksAwarded: 1,
+  });
+  assert.equal(validateStudentAnswer(qYesNo, { answer_data: { selected_answer: 'maybe' } }).error, 'Choose Yes or No.');
 
   const ans4 = validateStudentAnswer(qShort, { answer_data: { text: '  dhaka ' } });
   assert.deepEqual(evaluateQuestionAnswer(qShort, { selected_option: ans4.selected_option, answer_data: ans4.answerDataJson }, penalty), {
@@ -602,6 +676,22 @@ test('SQLite and D1 migrations upgrade populated legacy databases losslessly and
     const insertedTf = db.prepare('SELECT * FROM questions WHERE id = 3').get();
     assert.equal(insertedTf.question_type, 'true_false');
     assert.equal(insertedTf.correct_option, '');
+
+    const { question: newYesNo, errors: yesNoErrors } = normalizeQuestion({
+      question_text: 'Does the Pacific Ocean touch Bangladesh?',
+      question_type: 'yes_no',
+      category: 'Geography',
+      answer_key: { correct_answer: 'no' },
+    });
+    assert.deepEqual(yesNoErrors, []);
+    db.prepare(`INSERT INTO questions (question_text, question_type, option_a, option_b, option_c, option_d, correct_option, question_config, answer_key, media, category, difficulty, explanation)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      newYesNo.question_text, newYesNo.question_type, newYesNo.option_a, newYesNo.option_b, newYesNo.option_c, newYesNo.option_d,
+      newYesNo.correct_option, newYesNo.question_config, newYesNo.answer_key, newYesNo.media, newYesNo.category, newYesNo.difficulty, newYesNo.explanation,
+    );
+    const insertedYesNo = db.prepare('SELECT * FROM questions WHERE id = 4').get();
+    assert.equal(insertedYesNo.question_type, 'yes_no');
+    assert.deepEqual(JSON.parse(insertedYesNo.answer_key), { correct_answer: 'no' });
     db.close();
 
     // 2. Test D1 / Drizzle SQL migrations (0000..0004 -> populate -> 0005)
@@ -647,7 +737,7 @@ test('SQLite and D1 migrations upgrade populated legacy databases losslessly and
     assert.equal(JSON.parse(triggeredQ.question_config).options.length, 4);
     d1.close();
   } finally {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -824,26 +914,85 @@ test('BULK_PASTE_SAMPLE includes one example for every supported question type a
   const q2Key = JSON.parse(questions[2].answer_key);
   assert.equal(q2Key.correct_answer, true);
 
-  assert.equal(questions[3].question_type, QUESTION_TYPES.FILL_BLANK);
+  assert.equal(questions[3].question_type, QUESTION_TYPES.YES_NO);
   const q3Key = JSON.parse(questions[3].answer_key);
-  assert.deepEqual(q3Key.blanks.B1, ['H2O']);
+  assert.equal(q3Key.correct_answer, 'yes');
 
-  assert.equal(questions[4].question_type, QUESTION_TYPES.SHORT_ANSWER);
+  assert.equal(questions[4].question_type, QUESTION_TYPES.FILL_BLANK);
   const q4Key = JSON.parse(questions[4].answer_key);
-  assert.deepEqual(q4Key.accepted_answers, ['Mitochondria']);
+  assert.deepEqual(q4Key.blanks.B1, ['H2O']);
 
-  assert.equal(questions[5].question_type, QUESTION_TYPES.NUMERIC);
+  assert.equal(questions[5].question_type, QUESTION_TYPES.SHORT_ANSWER);
   const q5Key = JSON.parse(questions[5].answer_key);
-  assert.equal(q5Key.value, 9.8);
-  assert.equal(q5Key.tolerance, 0.1);
+  assert.deepEqual(q5Key.accepted_answers, ['Mitochondria']);
 
-  assert.equal(questions[6].question_type, QUESTION_TYPES.ORDERING);
+  assert.equal(questions[6].question_type, QUESTION_TYPES.NUMERIC);
   const q6Key = JSON.parse(questions[6].answer_key);
-  assert.deepEqual(q6Key.correct_order, ['I1', 'I2', 'I3', 'I4']);
+  assert.equal(q6Key.value, 9.8);
+  assert.equal(q6Key.tolerance, 0.1);
 
-  assert.equal(questions[7].question_type, QUESTION_TYPES.MATCHING);
+  assert.equal(questions[7].question_type, QUESTION_TYPES.ORDERING);
   const q7Key = JSON.parse(questions[7].answer_key);
-  assert.deepEqual(q7Key.pairs, { P1: 'C1', P2: 'C2', P3: 'C3' });
-});
+  assert.deepEqual(q7Key.correct_order, ['I1', 'I2', 'I3', 'I4']);
 
+  assert.equal(questions[8].question_type, QUESTION_TYPES.MATCHING);
+  const q8Key = JSON.parse(questions[8].answer_key);
+  assert.deepEqual(q8Key.pairs, { P1: 'C1', P2: 'C2', P3: 'C3' });
+});
+test('local SQLite upgrades the current extensible schema to allow yes_no without breaking exam history', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcq-yes-no-migration-'));
+  const db = await openTestDatabase(path.join(tmpDir, 'current-sqlite.db'));
+  try {
+    const priorMigrations = [
+      '0000_green_maggott.sql',
+      '0001_supreme_inertia.sql',
+      '0002_long_clea.sql',
+      '0003_add_short_url.sql',
+      '0004_add_allow_pdf_download.sql',
+      '0005_extensible_question_types.sql',
+    ];
+    for (const file of priorMigrations) {
+      db.exec(fs.readFileSync(path.join(root, 'drizzle', file), 'utf8'));
+    }
+    db.exec(`
+      INSERT INTO questions (id,question_text,option_a,option_b,option_c,option_d,correct_option,category)
+      VALUES (11,'Legacy MCQ?','A','B','C','D','A','General');
+      INSERT INTO exams (id,title,duration_minutes,status,show_score,show_answers)
+      VALUES (21,'Existing exam',30,'published',1,1);
+      INSERT INTO exam_questions (exam_id,question_id,marks,sort_order) VALUES (21,11,2,0);
+      INSERT INTO attempts (id,exam_id,access_token,student_name,roll_number,started_at,submitted_at,score,status)
+      VALUES (31,21,'legacy-current-token','Student','42','2026-10-01T00:00:00Z','2026-10-01T00:30:00Z',2,'submitted');
+      INSERT INTO answers (id,attempt_id,question_id,selected_option,is_correct,marks_awarded)
+      VALUES (41,31,11,'A',1,2);
+    `);
+
+    migrateSqliteDatabase(db);
+
+    assert.deepEqual(db.pragma('foreign_key_check'), []);
+    assert.deepEqual(db.prepare('SELECT exam_id,question_id,marks,sort_order FROM exam_questions').get(), {
+      exam_id: 21, question_id: 11, marks: 2, sort_order: 0,
+    });
+    assert.deepEqual(db.prepare('SELECT score,status FROM attempts WHERE id=31').get(), { score: 2, status: 'submitted' });
+    assert.deepEqual(db.prepare('SELECT selected_option,answer_data,marks_awarded FROM answers WHERE id=41').get(), {
+      selected_option: 'A', answer_data: '{"selected_option":"A"}', marks_awarded: 2,
+    });
+
+    const { question: yesNo, errors } = normalizeQuestion({
+      question_text: 'Does the Pacific Ocean touch Bangladesh?',
+      question_type: 'yes_no',
+      category: 'Geography',
+      answer_key: { correct_answer: 'no' },
+    });
+    assert.deepEqual(errors, []);
+    db.prepare(`INSERT INTO questions (question_text,question_type,option_a,option_b,correct_option,question_config,answer_key,category)
+      VALUES (?,?,?,?,?,?,?,?)`).run(
+      yesNo.question_text, yesNo.question_type, yesNo.option_a, yesNo.option_b, yesNo.correct_option,
+      yesNo.question_config, yesNo.answer_key, yesNo.category,
+    );
+    assert.equal(db.prepare('SELECT question_type FROM questions WHERE id=12').get().question_type, 'yes_no');
+  } finally {
+    db.close();
+    fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
 

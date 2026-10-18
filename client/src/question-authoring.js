@@ -95,6 +95,18 @@ const RELEVANT_INPUTS_BY_TYPE = Object.freeze({
       'explanation',
     ]),
   }),
+  [QUESTION_TYPES.YES_NO]: Object.freeze({
+    sections: Object.freeze(['common', 'yes_no', 'media', 'explanation']),
+    inputs: Object.freeze([
+      'question_type',
+      'question_text',
+      'yes_no_correct_answer',
+      'category',
+      'difficulty',
+      'media_type',
+      'explanation',
+    ]),
+  }),
   [QUESTION_TYPES.FILL_BLANK]: Object.freeze({
     sections: Object.freeze(['common', 'fill_blank', 'media', 'explanation']),
     inputs: Object.freeze([
@@ -206,6 +218,8 @@ export function createDefaultTypeSlice(type) {
         false_text: 'False',
         correct_answer: true,
       };
+    case QUESTION_TYPES.YES_NO:
+      return { correct_answer: 'yes' };
     case QUESTION_TYPES.FILL_BLANK:
       return {
         blanks: [
@@ -259,6 +273,7 @@ export function createEmptyTypeData() {
     [QUESTION_TYPES.MCQ_SINGLE]: createDefaultTypeSlice(QUESTION_TYPES.MCQ_SINGLE),
     [QUESTION_TYPES.MCQ_MULTI]: createDefaultTypeSlice(QUESTION_TYPES.MCQ_MULTI),
     [QUESTION_TYPES.TRUE_FALSE]: createDefaultTypeSlice(QUESTION_TYPES.TRUE_FALSE),
+    [QUESTION_TYPES.YES_NO]: createDefaultTypeSlice(QUESTION_TYPES.YES_NO),
     [QUESTION_TYPES.FILL_BLANK]: createDefaultTypeSlice(QUESTION_TYPES.FILL_BLANK),
     [QUESTION_TYPES.SHORT_ANSWER]: createDefaultTypeSlice(QUESTION_TYPES.SHORT_ANSWER),
     [QUESTION_TYPES.NUMERIC]: createDefaultTypeSlice(QUESTION_TYPES.NUMERIC),
@@ -321,6 +336,11 @@ export function createQuestionDraft(question = null) {
         true_text: String(trueOpt?.text || hydrated.option_a || 'True'),
         false_text: String(falseOpt?.text || hydrated.option_b || 'False'),
         correct_answer: aKey.correct_answer !== undefined ? Boolean(aKey.correct_answer) : true,
+      };
+    } else if (questionType === QUESTION_TYPES.YES_NO) {
+      const answer = String(aKey.correct_answer ?? 'yes').trim().toLowerCase();
+      typeData[QUESTION_TYPES.YES_NO] = {
+        correct_answer: answer === 'no' ? 'no' : 'yes',
       };
     } else if (questionType === QUESTION_TYPES.SHORT_ANSWER) {
       const accepted = Array.isArray(aKey.accepted_answers) && aKey.accepted_answers.length > 0
@@ -453,6 +473,8 @@ export function hasPopulatedTypeData(draft, type = draft?.question_type) {
         (td.true_text?.trim() && td.true_text.trim() !== 'True') ||
         (td.false_text?.trim() && td.false_text.trim() !== 'False')
       );
+    case QUESTION_TYPES.YES_NO:
+      return false;
     case QUESTION_TYPES.FILL_BLANK:
       return Boolean((td.blanks || []).some((b) => (b.variants || []).some((v) => v?.trim())));
     case QUESTION_TYPES.SHORT_ANSWER:
@@ -1001,6 +1023,20 @@ export function buildQuestionPayloadFromDraft(draft) {
     };
   }
 
+  if (qType === QUESTION_TYPES.YES_NO) {
+    const correctAnswer = String(td.correct_answer || 'yes').trim().toLowerCase();
+    return {
+      ...base,
+      question_config: {
+        options: [
+          { id: 'yes', text: 'Yes' },
+          { id: 'no', text: 'No' },
+        ],
+      },
+      answer_key: { correct_answer: correctAnswer },
+    };
+  }
+
   if (qType === QUESTION_TYPES.SHORT_ANSWER) {
     const rawList = Array.isArray(td.accepted_answers) ? td.accepted_answers : [];
     const cleanedList = rawList.map((a) => String(a ?? '').trim()).filter(Boolean);
@@ -1147,6 +1183,10 @@ export function formatAnswerKeySummary(questionRow) {
     }
     return '—';
   }
+  if (qType === QUESTION_TYPES.YES_NO) {
+    const answer = String(aKey.correct_answer || '').toLowerCase();
+    return answer === 'yes' ? 'Yes' : answer === 'no' ? 'No' : '—';
+  }
   if (qType === QUESTION_TYPES.FILL_BLANK) {
     const blanks = aKey.blanks && typeof aKey.blanks === 'object' ? aKey.blanks : {};
     const entries = Object.entries(blanks);
@@ -1242,6 +1282,15 @@ export function buildQuestionPreviewModel(questionOrDraft) {
         isCorrect: (opt.id === 'true' && correctBool) || (opt.id === 'false' && !correctBool),
       })),
       correct_answer: correctBool,
+    };
+  } else if (qType === QUESTION_TYPES.YES_NO) {
+    const correctAnswer = String(aKey.correct_answer || '').toLowerCase();
+    details = {
+      options: [
+        { id: 'yes', text: 'Yes', isCorrect: correctAnswer === 'yes' },
+        { id: 'no', text: 'No', isCorrect: correctAnswer === 'no' },
+      ],
+      correct_answer: correctAnswer,
     };
   } else if (qType === QUESTION_TYPES.FILL_BLANK) {
     const rawBlanks = Array.isArray(qConfig.blanks) ? qConfig.blanks : [];
@@ -1340,6 +1389,9 @@ export function isAnswerProvided(questionRow, selectedOption, answerData) {
   if (qType === QUESTION_TYPES.TRUE_FALSE) {
     return typeof answerData?.selected_answer === 'boolean';
   }
+  if (qType === QUESTION_TYPES.YES_NO) {
+    return answerData?.selected_answer === 'yes' || answerData?.selected_answer === 'no';
+  }
   if (qType === QUESTION_TYPES.FILL_BLANK) {
     const blanks = answerData?.blanks;
     return Boolean(blanks && typeof blanks === 'object' && Object.values(blanks).some((v) => typeof v === 'string' && v.trim().length > 0));
@@ -1385,6 +1437,10 @@ export function formatStudentAnswerSummary(answerRow) {
   if (qType === QUESTION_TYPES.TRUE_FALSE) {
     if (typeof data.selected_answer !== 'boolean') return 'Not answered';
     return data.selected_answer ? 'True' : 'False';
+  }
+  if (qType === QUESTION_TYPES.YES_NO) {
+    const answer = String(data.selected_answer || '').toLowerCase();
+    return answer === 'yes' ? 'Yes' : answer === 'no' ? 'No' : 'Not answered';
   }
   if (qType === QUESTION_TYPES.FILL_BLANK) {
     const blanks = data.blanks && typeof data.blanks === 'object' ? data.blanks : {};
@@ -1439,6 +1495,10 @@ export function formatCorrectAnswerSummary(questionOrAnswerRow) {
   if (qType === QUESTION_TYPES.TRUE_FALSE) {
     if (typeof aKey.correct_answer !== 'boolean') return '—';
     return aKey.correct_answer ? 'True' : 'False';
+  }
+  if (qType === QUESTION_TYPES.YES_NO) {
+    const answer = String(aKey.correct_answer || '').toLowerCase();
+    return answer === 'yes' ? 'Yes' : answer === 'no' ? 'No' : '—';
   }
   if (qType === QUESTION_TYPES.FILL_BLANK) {
     const blanks = aKey.blanks && typeof aKey.blanks === 'object' ? aKey.blanks : {};
@@ -1521,6 +1581,11 @@ export function syncDraftFromForm(draft, form) {
     }
     if (data.has('true_text')) td.true_text = String(data.get('true_text') ?? 'True');
     if (data.has('false_text')) td.false_text = String(data.get('false_text') ?? 'False');
+  } else if (qType === QUESTION_TYPES.YES_NO) {
+    if (data.has('yes_no_correct_answer')) {
+      const answer = String(data.get('yes_no_correct_answer') || '').trim().toLowerCase();
+      if (answer === 'yes' || answer === 'no') td.correct_answer = answer;
+    }
   } else if (qType === QUESTION_TYPES.FILL_BLANK) {
     td.blanks.forEach((b, bIdx) => {
       const labelKey = `blank_label_${bIdx}`;
