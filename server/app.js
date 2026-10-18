@@ -24,8 +24,15 @@ const app = express();
 const port = Number(process.env.PORT || 3000);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const clientBuild = path.join(root, 'dist', 'client');
-const uploadsDir = path.resolve(process.env.UPLOADS_DIR || path.join(root, 'data', 'uploads'));
-fs.mkdirSync(uploadsDir, { recursive: true });
+const defaultUploadsDir = process.env.DB_PATH
+  ? path.join(path.dirname(path.resolve(process.env.DB_PATH)), 'uploads')
+  : path.join(root, 'data', 'uploads');
+const uploadsDir = path.resolve(process.env.UPLOADS_DIR || defaultUploadsDir);
+try {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+} catch (err) {
+  console.warn(`Could not create uploads directory at ${uploadsDir}:`, err.message);
+}
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 12 * 1024 * 1024, files: 1 } });
 const adminUsername = process.env.ADMIN_USERNAME || 'admin';
 const derivePassword = promisify(crypto.pbkdf2);
