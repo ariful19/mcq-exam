@@ -86,6 +86,9 @@ async function loadMcqAppClass() {
     export function keyed(_key, tpl) {
       return tpl;
     }
+    export function unsafeHTML(val) {
+      return { __litHtml: String(val ?? ''), toString() { return String(val ?? ''); } };
+    }
   `, 'utf8');
 
   const motionStubPath = path.join(tmpDir, 'motion-stub.mjs');
@@ -111,6 +114,7 @@ async function loadMcqAppClass() {
   appSource = appSource
     .replace(`import { LitElement, html } from 'lit';`, `import { LitElement, html } from '${litStubUrl}';`)
     .replace(`import { keyed } from 'lit/directives/keyed.js';`, `import { keyed } from '${litStubUrl}';`)
+    .replace(`import { unsafeHTML } from 'lit/directives/unsafe-html.js';`, `import { unsafeHTML } from '${litStubUrl}';`)
     .replace(`import './style.css';`, ``)
     .replace(/import\s*\{[^}]*\}\s*from\s*'\.\/motion\.js';/, `import { installMotion, appear, disappear, slideQuestion, setMotionActive, shouldEnableMotion } from '${motionStubUrl}';`)
     .replace(`import { filterAndSortResults } from './results.js';`, `import { filterAndSortResults } from '${resultsUrl}';`)
@@ -139,31 +143,35 @@ test('manual question editor shows only relevant inputs for each supported quest
     const expectedSectionByType = {
       [QUESTION_TYPES.MCQ_SINGLE]: {
         present: ['data-type-section="mcq_single"', 'name="option_a"', 'name="option_b"', 'name="option_c"', 'name="option_d"', 'name="correct_option"'],
-        absent: ['data-type-section="mcq_multi"', 'data-type-section="true_false"', 'data-type-section="short_answer"', 'data-type-section="numeric"', 'data-type-section="matching"', 'data-type-section="ordering"', 'name="numeric_value"', 'name="accepted_answer_0"', 'name="matching_prompt_0"', 'name="ordering_item_0"'],
+        absent: ['data-type-section="mcq_multi"', 'data-type-section="true_false"', 'data-type-section="fill_blank"', 'data-type-section="short_answer"', 'data-type-section="numeric"', 'data-type-section="matching"', 'data-type-section="ordering"', 'name="numeric_value"', 'name="accepted_answer_0"', 'name="matching_prompt_0"', 'name="ordering_item_0"'],
       },
       [QUESTION_TYPES.MCQ_MULTI]: {
         present: ['data-type-section="mcq_multi"', 'name="multi_option_0"', 'name="multi_correct_A"', 'name="min_selections"', 'name="max_selections"'],
-        absent: ['data-type-section="mcq_single"', 'name="correct_option"', 'data-type-section="true_false"', 'data-type-section="short_answer"', 'data-type-section="numeric"', 'data-type-section="matching"', 'data-type-section="ordering"'],
+        absent: ['data-type-section="mcq_single"', 'name="correct_option"', 'data-type-section="true_false"', 'data-type-section="fill_blank"', 'data-type-section="short_answer"', 'data-type-section="numeric"', 'data-type-section="matching"', 'data-type-section="ordering"'],
       },
       [QUESTION_TYPES.TRUE_FALSE]: {
         present: ['data-type-section="true_false"', 'name="correct_answer"', 'name="true_text"', 'name="false_text"'],
-        absent: ['data-type-section="mcq_single"', 'name="option_a"', 'name="option_c"', 'data-type-section="mcq_multi"', 'data-type-section="short_answer"', 'data-type-section="numeric"', 'data-type-section="matching"', 'data-type-section="ordering"'],
+        absent: ['data-type-section="mcq_single"', 'name="option_a"', 'name="option_c"', 'data-type-section="mcq_multi"', 'data-type-section="fill_blank"', 'data-type-section="short_answer"', 'data-type-section="numeric"', 'data-type-section="matching"', 'data-type-section="ordering"'],
+      },
+      [QUESTION_TYPES.FILL_BLANK]: {
+        present: ['data-type-section="fill_blank"', 'name="blank_label_0"', 'name="blank_0_variant_0"'],
+        absent: ['data-type-section="mcq_single"', 'name="option_a"', 'data-type-section="mcq_multi"', 'data-type-section="true_false"', 'data-type-section="short_answer"', 'data-type-section="numeric"', 'data-type-section="matching"', 'data-type-section="ordering"'],
       },
       [QUESTION_TYPES.SHORT_ANSWER]: {
         present: ['data-type-section="short_answer"', 'name="accepted_answer_0"', 'name="case_sensitive"', 'name="max_length"', 'name="placeholder"'],
-        absent: ['data-type-section="mcq_single"', 'name="option_a"', 'data-type-section="mcq_multi"', 'data-type-section="true_false"', 'data-type-section="numeric"', 'name="numeric_tolerance"', 'data-type-section="matching"', 'data-type-section="ordering"'],
+        absent: ['data-type-section="mcq_single"', 'name="option_a"', 'data-type-section="mcq_multi"', 'data-type-section="true_false"', 'data-type-section="fill_blank"', 'data-type-section="numeric"', 'name="numeric_tolerance"', 'data-type-section="matching"', 'data-type-section="ordering"'],
       },
       [QUESTION_TYPES.NUMERIC]: {
         present: ['data-type-section="numeric"', 'name="numeric_value"', 'name="numeric_tolerance"', 'name="numeric_unit"', 'name="allow_decimals"'],
-        absent: ['data-type-section="mcq_single"', 'name="option_a"', 'data-type-section="mcq_multi"', 'data-type-section="true_false"', 'data-type-section="short_answer"', 'name="accepted_answer_0"', 'data-type-section="matching"', 'data-type-section="ordering"'],
+        absent: ['data-type-section="mcq_single"', 'name="option_a"', 'data-type-section="mcq_multi"', 'data-type-section="true_false"', 'data-type-section="fill_blank"', 'data-type-section="short_answer"', 'name="accepted_answer_0"', 'data-type-section="matching"', 'data-type-section="ordering"'],
       },
       [QUESTION_TYPES.MATCHING]: {
         present: ['data-type-section="matching"', 'name="matching_prompt_0"', 'name="matching_choice_0"', 'name="matching_pair_P1"'],
-        absent: ['data-type-section="mcq_single"', 'name="option_a"', 'data-type-section="mcq_multi"', 'data-type-section="true_false"', 'data-type-section="short_answer"', 'data-type-section="numeric"', 'data-type-section="ordering"'],
+        absent: ['data-type-section="mcq_single"', 'name="option_a"', 'data-type-section="mcq_multi"', 'data-type-section="true_false"', 'data-type-section="fill_blank"', 'data-type-section="short_answer"', 'data-type-section="numeric"', 'data-type-section="ordering"'],
       },
       [QUESTION_TYPES.ORDERING]: {
         present: ['data-type-section="ordering"', 'name="ordering_item_0"', 'name="ordering_item_1"', 'Move item 1 down'],
-        absent: ['data-type-section="mcq_single"', 'name="option_a"', 'data-type-section="mcq_multi"', 'data-type-section="true_false"', 'data-type-section="short_answer"', 'data-type-section="numeric"', 'data-type-section="matching"'],
+        absent: ['data-type-section="mcq_single"', 'name="option_a"', 'data-type-section="mcq_multi"', 'data-type-section="true_false"', 'data-type-section="fill_blank"', 'data-type-section="short_answer"', 'data-type-section="numeric"', 'data-type-section="matching"'],
       },
     };
 
@@ -369,6 +377,17 @@ test('create, preview/view, and edit work across all 7 question types, legacy MC
         },
         answer_key: { correct_order: ['I1', 'I2', 'I3'] },
       },
+      {
+        id: 108,
+        question_text: 'The chemical symbol for water is [blank].',
+        question_type: 'fill_blank',
+        category: 'Chemistry',
+        difficulty: 'Easy',
+        question_config: {
+          blanks: [{ id: 'B1', label: 'Blank 1' }],
+        },
+        answer_key: { blanks: { B1: ['H2O', 'h2o'] } },
+      },
     ];
 
     const hydratedBank = sampleInputs.map((item) => {
@@ -383,6 +402,7 @@ test('create, preview/view, and edit work across all 7 question types, legacy MC
     assert.ok(adminHtml.includes('Single MCQ'));
     assert.ok(adminHtml.includes('Multi-select'));
     assert.ok(adminHtml.includes('True / False'));
+    assert.ok(adminHtml.includes('Fill in blanks'));
     assert.ok(adminHtml.includes('Short answer'));
     assert.ok(adminHtml.includes('Numeric'));
     assert.ok(adminHtml.includes('Matching'));
@@ -399,7 +419,7 @@ test('create, preview/view, and edit work across all 7 question types, legacy MC
     for (const q of hydratedBank) {
       app.openQuestionPreview(q);
       const previewModalHtml = renderLitValue(app.renderQuestionPreviewModal());
-      assert.ok(previewModalHtml.includes(q.question_text), `Preview modal must show prompt for ${q.question_type}`);
+      assert.ok(previewModalHtml.includes(q.question_text) || previewModalHtml.includes('________'), `Preview modal must show prompt for ${q.question_type}`);
       assert.ok(previewModalHtml.includes(getQuestionTypeMeta(q.question_type).label), `Preview modal must show type label for ${q.question_type}`);
 
       app.editFromPreview(q);

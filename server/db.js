@@ -28,7 +28,7 @@ db.exec(`
     difficulty TEXT NOT NULL DEFAULT '',
     explanation TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT questions_type_check CHECK (question_type IN ('mcq_single','mcq_multi','true_false','short_answer','numeric','matching','ordering')),
+    CONSTRAINT questions_type_check CHECK (question_type IN ('mcq_single','mcq_multi','true_false','fill_blank','short_answer','numeric','matching','ordering')),
     CONSTRAINT questions_correct_option_check CHECK ((question_type = 'mcq_single' AND correct_option IN ('A','B','C','D')) OR (question_type != 'mcq_single' AND (correct_option = '' OR correct_option IN ('A','B','C','D'))))
   );
   CREATE TABLE IF NOT EXISTS exams (

@@ -2,6 +2,7 @@ export const QUESTION_TYPES = Object.freeze({
   MCQ_SINGLE: 'mcq_single',
   MCQ_MULTI: 'mcq_multi',
   TRUE_FALSE: 'true_false',
+  FILL_BLANK: 'fill_blank',
   SHORT_ANSWER: 'short_answer',
   NUMERIC: 'numeric',
   MATCHING: 'matching',
@@ -32,6 +33,12 @@ export const QUESTION_TYPE_META = Object.freeze({
     shortLabel: 'True / False',
     description: 'Statement where either True or False is the correct answer.',
   }),
+  [QUESTION_TYPES.FILL_BLANK]: Object.freeze({
+    id: QUESTION_TYPES.FILL_BLANK,
+    label: 'Fill in the blank(s)',
+    shortLabel: 'Fill in blanks',
+    description: 'One or more inline blanks in formatted question text.',
+  }),
   [QUESTION_TYPES.SHORT_ANSWER]: Object.freeze({
     id: QUESTION_TYPES.SHORT_ANSWER,
     label: 'Short answer',
@@ -57,6 +64,60 @@ export const QUESTION_TYPE_META = Object.freeze({
     description: 'Arrange items into the correct sequential order.',
   }),
 });
+
+export function sanitizeRichText(input) {
+  if (input === undefined || input === null) return '';
+  let str = String(input);
+  if (!str) return '';
+
+  // Strip dangerous tags completely
+  str = str.replace(/<\s*(script|style|iframe|object|embed|video|applet|meta|link|form|svg)\b[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, '');
+  str = str.replace(/<\s*(script|style|iframe|object|embed|video|applet|meta|link|form|svg)\b[^>]*\/?>/gi, '');
+  // Strip dangerous event handler attributes (onerror, onclick, onload, etc.)
+  str = str.replace(/\son\w+\s*=\s*(['"]).*?\1/gi, '');
+  str = str.replace(/\son\w+\s*=\s*[^>\s]+/gi, '');
+  str = str.replace(/javascript:/gi, '');
+
+  // Convert markdown bold, italic, strikethrough if present
+  str = str.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+  str = str.replace(/~~(.*?)~~/g, '<del>$1</del>');
+
+  // Keep only safe inline formatting tags: b, strong, i, em, u, s, del, strike, br, code, span
+  str = str.replace(/<([^>]+)>/g, (match, tagContent) => {
+    const tagNameMatch = tagContent.match(/^(\/?)(b|strong|i|em|u|s|del|strike|br|code|span)\b/i);
+    if (tagNameMatch) {
+      const isClosing = tagNameMatch[1] === '/';
+      const name = tagNameMatch[2].toLowerCase();
+      if (name === 'br') return '<br>';
+      if (name === 'span') {
+        if (isClosing) return '</span>';
+        if (/class=(['"])(?:blank-underline|inline-blank)\1/i.test(tagContent)) {
+          return '<span class="blank-underline">';
+        }
+        return '';
+      }
+      return isClosing ? `</${name}>` : `<${name}>`;
+    }
+    return ''; // strip any other tag
+  });
+
+  return str;
+}
+
+export function formatQuestionBlanks(input) {
+  if (input === undefined || input === null) return '';
+  return String(input).replace(/(?:\[blank[\s\d_:-]*\]|\{\{blank[\s\d_:-]*\}\}|_{3,})/gi, '<span class="blank-underline">________</span>');
+}
+
+export function cleanQuestionBlanks(input) {
+  if (input === undefined || input === null) return '';
+  return String(input).replace(/(?:\[blank[\s\d_:-]*\]|\{\{blank[\s\d_:-]*\}\}|_{3,})/gi, '________');
+}
+
+export function renderQuestionText(input) {
+  if (input === undefined || input === null) return '';
+  return sanitizeRichText(formatQuestionBlanks(input));
+}
 
 function isPlainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -111,14 +172,22 @@ export function validateQuestionMedia(rawMedia) {
   } else if (!ALLOWED_MEDIA_TYPES.includes(type)) {
     errors.push('Media type must be "image" or "audio".');
   }
+
+  const isPlaceholder = Boolean(
+    value.placeholder ||
+    value.pending ||
+    value.url === '[placeholder]' ||
+    value.url === 'pending' ||
+    value.is_placeholder
+  );
   const url = String(value.url ?? '').trim();
-  if (!url) {
+  if (!isPlaceholder && !url) {
     errors.push('Media url is required when media is provided.');
-  } else if (url.length > 2048) {
+  } else if (!isPlaceholder && url.length > 2048) {
     errors.push('Media url must be 2048 characters or fewer.');
-  } else if (/^data:video\//i.test(url) || /^javascript:/i.test(url)) {
+  } else if (!isPlaceholder && (/^data:video\//i.test(url) || /^javascript:/i.test(url))) {
     errors.push('Media url uses an unsupported or unsafe protocol.');
-  } else if (!/^(https?:\/\/|\/|data:image\/|data:audio\/)/i.test(url)) {
+  } else if (!isPlaceholder && !/^(https?:\/\/|\/|data:image\/|data:audio\/)/i.test(url)) {
     errors.push('Media url must be an http(s) URL, relative path, or image/audio data URI.');
   }
   const alt = value.alt !== undefined && value.alt !== null ? String(value.alt).trim() : '';
@@ -129,11 +198,50 @@ export function validateQuestionMedia(rawMedia) {
   if (errors.length) return { media: null, mediaJson: null, errors };
   const normalized = {
     type,
-    url,
+    url: isPlaceholder ? (url || '[placeholder]') : url,
+    ...(isPlaceholder ? { placeholder: true } : {}),
     ...(alt ? { alt } : {}),
     ...(caption ? { caption } : {}),
   };
   return { media: normalized, mediaJson: JSON.stringify(normalized), errors };
+}
+
+export function validateQuestionStimulus(rawStimulus) {
+  const errors = [];
+  if (rawStimulus === undefined || rawStimulus === null || rawStimulus === '' || rawStimulus === 'null') {
+    return { stimulus: null, errors };
+  }
+  const parsed = parseJsonValue(rawStimulus, null);
+  if (!parsed.ok || !isPlainObject(parsed.value)) {
+    return { stimulus: null, errors: ['Question stimulus must be a valid JSON object or null.'] };
+  }
+  const value = parsed.value;
+  if (Object.keys(value).length === 0) {
+    return { stimulus: null, errors };
+  }
+  const id = value.id ? String(value.id).trim() : '';
+  const title = value.title ? String(value.title).trim().slice(0, 200) : '';
+  const text = value.text ? sanitizeRichText(String(value.text).trim().slice(0, 10000)) : '';
+
+  let media = null;
+  if (value.media) {
+    const { media: validMedia, errors: mediaErrors } = validateQuestionMedia(value.media);
+    if (mediaErrors.length) errors.push(...mediaErrors.map((e) => `Stimulus media: ${e}`));
+    else media = validMedia;
+  }
+
+  if (!title && !text && !media) {
+    errors.push('Stimulus must have at least a title, text passage, or media item.');
+  }
+
+  if (errors.length) return { stimulus: null, errors };
+  const stimulus = {
+    ...(id ? { id } : {}),
+    ...(title ? { title } : {}),
+    ...(text ? { text } : {}),
+    ...(media ? { media } : {}),
+  };
+  return { stimulus, errors };
 }
 
 function detectForbiddenFeatures(input, configObj, answerKeyObj) {
@@ -205,7 +313,16 @@ export function normalizeQuestion(input = {}) {
       errors.push('Question type must be a non-empty string identifier.');
       questionType = '';
     } else {
-      questionType = rawTypeField.trim().toLowerCase();
+      let qTypeCandidate = rawTypeField.trim().toLowerCase();
+      if (qTypeCandidate === 'fill_blanks' || qTypeCandidate === 'fill-in-the-blank' || qTypeCandidate === 'fill_in_the_blank') {
+        qTypeCandidate = QUESTION_TYPES.FILL_BLANK;
+      } else if (qTypeCandidate === 'yes_no') {
+        qTypeCandidate = QUESTION_TYPES.TRUE_FALSE;
+      } else if (qTypeCandidate === 'rearrangement') {
+        qTypeCandidate = QUESTION_TYPES.ORDERING;
+      }
+      questionType = qTypeCandidate;
+
       if (questionType.includes('video')) {
         errors.push('Video questions and video media are not supported.');
       } else if (questionType.includes('audio') || questionType.includes('upload')) {
@@ -218,10 +335,11 @@ export function normalizeQuestion(input = {}) {
     }
   }
 
-  const questionText = String(input.question_text ?? input.Question ?? '').trim();
+  const rawQuestionText = String(input.question_text ?? input.Question ?? '').trim();
+  const questionText = sanitizeRichText(rawQuestionText);
   const category = String(input.category ?? input.Category ?? input.subject ?? input.Subject ?? '').trim();
   const difficulty = String(input.difficulty ?? input.Difficulty ?? '').trim();
-  const explanation = String(input.explanation ?? input.Explanation ?? '').trim();
+  const explanation = sanitizeRichText(String(input.explanation ?? input.Explanation ?? '').trim());
 
   if (!questionText) errors.push('Question is required.');
 
@@ -252,10 +370,14 @@ export function normalizeQuestion(input = {}) {
   const { mediaJson, errors: mediaErrors } = validateQuestionMedia(input.media ?? input.Media);
   errors.push(...mediaErrors);
 
-  let optionA = String(input.option_a ?? input['Option A'] ?? '').trim();
-  let optionB = String(input.option_b ?? input['Option B'] ?? '').trim();
-  let optionC = String(input.option_c ?? input['Option C'] ?? '').trim();
-  let optionD = String(input.option_d ?? input['Option D'] ?? '').trim();
+  const rawStimulus = input.stimulus ?? configInput.stimulus;
+  const { stimulus, errors: stimErrors } = validateQuestionStimulus(rawStimulus);
+  errors.push(...stimErrors);
+
+  let optionA = sanitizeRichText(String(input.option_a ?? input['Option A'] ?? '').trim());
+  let optionB = sanitizeRichText(String(input.option_b ?? input['Option B'] ?? '').trim());
+  let optionC = sanitizeRichText(String(input.option_c ?? input['Option C'] ?? '').trim());
+  let optionD = sanitizeRichText(String(input.option_d ?? input['Option D'] ?? '').trim());
   let correctOption = String(input.correct_option ?? input['Correct Answer'] ?? '').trim().toUpperCase();
 
   let normalizedConfig = {};
@@ -415,6 +537,86 @@ export function normalizeQuestion(input = {}) {
     correctOption = '';
     normalizedConfig = { options };
     normalizedAnswerKey = { correct_answer: boolAnswer };
+  } else if (questionType === QUESTION_TYPES.FILL_BLANK) {
+    let rawBlanks = configInput.blanks;
+    let blankList = [];
+    if (Array.isArray(rawBlanks) && rawBlanks.length > 0) {
+      blankList = rawBlanks.map((b, idx) => {
+        const id = String(b.id || `B${idx + 1}`).trim().toUpperCase();
+        return {
+          id,
+          label: String(b.label || `Blank ${idx + 1}`).trim(),
+          max_length: Number.isInteger(Number(b.max_length)) ? Number(b.max_length) : 100,
+          case_sensitive: Boolean(b.case_sensitive ?? configInput.case_sensitive ?? false),
+        };
+      });
+    } else {
+      const blankMatches = questionText.match(/\[blank\d*\]|___|{{blank\d*}}/gi) || [];
+      const count = blankMatches.length > 0 ? blankMatches.length : 1;
+      blankList = Array.from({ length: count }, (_, idx) => ({
+        id: `B${idx + 1}`,
+        label: `Blank ${idx + 1}`,
+        max_length: 100,
+        case_sensitive: Boolean(configInput.case_sensitive ?? false),
+      }));
+    }
+
+    let rawBlankAnswers = answerKeyInput.blanks ?? answerKeyInput.accepted_blanks ?? input.accepted_blanks;
+    if (rawBlankAnswers === undefined) {
+      const fallbackAns = String(input.correct_option ?? input['Correct Answer'] ?? answerKeyInput.accepted_answers ?? input.accepted_answers ?? '').trim();
+      if (fallbackAns) {
+        if (fallbackAns.includes(';') && fallbackAns.includes('=')) {
+          rawBlankAnswers = {};
+          fallbackAns.split(';').forEach((part) => {
+            const [k, v] = part.split('=').map((s) => s.trim());
+            if (k && v) rawBlankAnswers[k.toUpperCase()] = v.split('|').map((s) => s.trim()).filter(Boolean);
+          });
+        } else if (blankList.length === 1) {
+          rawBlankAnswers = { [blankList[0].id]: fallbackAns.split('|').map((s) => s.trim()).filter(Boolean) };
+        } else if (fallbackAns.includes(';')) {
+          const parts = fallbackAns.split(';').map((s) => s.trim());
+          rawBlankAnswers = {};
+          blankList.forEach((b, idx) => {
+            rawBlankAnswers[b.id] = (parts[idx] || '').split('|').map((s) => s.trim()).filter(Boolean);
+          });
+        } else {
+          rawBlankAnswers = { [blankList[0].id]: [fallbackAns] };
+        }
+      }
+    }
+
+    const normalizedBlanksKey = {};
+    if (!isPlainObject(rawBlankAnswers) && !Array.isArray(rawBlankAnswers)) {
+      errors.push('fill_blank requires answer_key.blanks with accepted variants for each blank.');
+    } else {
+      blankList.forEach((b) => {
+        const variants = isPlainObject(rawBlankAnswers)
+          ? rawBlankAnswers[b.id] ?? rawBlankAnswers[b.id.toLowerCase()]
+          : rawBlankAnswers;
+        const normVariants = (Array.isArray(variants) ? variants : [variants])
+          .map((v) => String(v ?? '').trim().normalize('NFC'))
+          .filter(Boolean);
+        if (!normVariants.length) {
+          errors.push(`Blank "${b.id}" requires at least one accepted answer variant.`);
+        } else {
+          normalizedBlanksKey[b.id] = normVariants;
+        }
+      });
+    }
+
+    optionA = '';
+    optionB = '';
+    optionC = '';
+    optionD = '';
+    correctOption = '';
+    normalizedConfig = {
+      blanks: blankList,
+      case_sensitive: Boolean(configInput.case_sensitive ?? false),
+    };
+    normalizedAnswerKey = {
+      blanks: normalizedBlanksKey,
+      case_sensitive: Boolean(configInput.case_sensitive ?? false),
+    };
   } else if (questionType === QUESTION_TYPES.SHORT_ANSWER) {
     let rawAccepted = answerKeyInput.accepted_answers ?? input.accepted_answers;
     if (rawAccepted === undefined) {
@@ -570,6 +772,10 @@ export function normalizeQuestion(input = {}) {
     correctOption = '';
     normalizedConfig = { items };
     normalizedAnswerKey = { correct_order: correctOrder };
+  }
+
+  if (stimulus) {
+    normalizedConfig.stimulus = stimulus;
   }
 
   if (!category) errors.push('Subject is required.');
@@ -764,6 +970,45 @@ export function validateStudentAnswer(questionRow, body = {}) {
     return { selected_option: null, answer_data: answerData, answerDataJson: JSON.stringify(answerData), error: null };
   }
 
+  if (qType === QUESTION_TYPES.FILL_BLANK) {
+    if ((hasAnswerData && dataObj === null) || (!hasAnswerData && (body.selected_option === null || body.selected_option === ''))) {
+      return { selected_option: null, answer_data: null, answerDataJson: null, error: null };
+    }
+    const rawBlanks = dataObj?.blanks ?? body.blanks;
+    if (rawBlanks === null || rawBlanks === undefined) {
+      const fallbackText = dataObj?.text ?? body.text;
+      if (typeof fallbackText === 'string' && fallbackText.trim()) {
+        const firstBlankId = (qConfig.blanks?.[0]?.id) || 'B1';
+        const answerData = { blanks: { [firstBlankId]: fallbackText.trim() } };
+        return { selected_option: null, answer_data: answerData, answerDataJson: JSON.stringify(answerData), error: null };
+      }
+      return { selected_option: null, answer_data: null, answerDataJson: null, error: null };
+    }
+    if (!isPlainObject(rawBlanks)) {
+      return { selected_option: null, answer_data: null, answerDataJson: null, error: 'Fill in the blank response must be an object of blank values.' };
+    }
+    const allowedBlankIds = new Set((qConfig.blanks || [{ id: 'B1' }]).map((b) => b.id.toUpperCase()));
+    const normalized = {};
+    let hasContent = false;
+    for (const [k, v] of Object.entries(rawBlanks)) {
+      const bId = String(k).trim().toUpperCase();
+      if (!allowedBlankIds.has(bId)) {
+        return { selected_option: null, answer_data: null, answerDataJson: null, error: `Invalid blank identifier "${k}".` };
+      }
+      const valStr = typeof v === 'string' ? v.trim() : (v !== null && v !== undefined ? String(v).trim() : '');
+      if (valStr.length > 250) {
+        return { selected_option: null, answer_data: null, answerDataJson: null, error: `Blank "${bId}" answer is too long (maximum 250 characters).` };
+      }
+      if (valStr) hasContent = true;
+      normalized[bId] = valStr;
+    }
+    if (!hasContent) {
+      return { selected_option: null, answer_data: null, answerDataJson: null, error: null };
+    }
+    const answerData = { blanks: normalized };
+    return { selected_option: null, answer_data: answerData, answerDataJson: JSON.stringify(answerData), error: null };
+  }
+
   if (qType === QUESTION_TYPES.SHORT_ANSWER) {
     if ((hasAnswerData && dataObj === null) || (!hasAnswerData && (body.selected_option === null || body.selected_option === ''))) {
       return { selected_option: null, answer_data: null, answerDataJson: null, error: null };
@@ -899,12 +1144,29 @@ export function evaluateQuestionAnswer(questionRow, answerRow, negativeMark = 0)
     const answered = selected.length > 0;
     if (!answered) return { answered: false, isCorrect: false, marksAwarded: 0 };
     const expected = Array.isArray(answerKey.correct_options) ? answerKey.correct_options : [];
-    const normSelected = [...new Set(selected.map((s) => String(s).toUpperCase()))].sort();
-    const normExpected = [...new Set(expected.map((s) => String(s).toUpperCase()))].sort();
-    const isCorrect = normSelected.length > 0 &&
-      normSelected.length === normExpected.length &&
-      normSelected.every((val, idx) => val === normExpected[idx]);
-    return { answered: true, isCorrect, marksAwarded: isCorrect ? marks : -penalty };
+    const normSelected = [...new Set(selected.map((s) => String(s).toUpperCase()))];
+    const normExpected = [...new Set(expected.map((s) => String(s).toUpperCase()))];
+    const expectedSet = new Set(normExpected);
+
+    const correctCount = expectedSet.size;
+    if (correctCount === 0) return { answered: true, isCorrect: false, marksAwarded: 0 };
+
+    let rightSelected = 0;
+    let wrongSelected = 0;
+    for (const opt of normSelected) {
+      if (expectedSet.has(opt)) rightSelected += 1;
+      else wrongSelected += 1;
+    }
+
+    const isCorrect = rightSelected === correctCount && wrongSelected === 0;
+
+    // Partial credit: +marks/C for each correct, -marks/C for each wrong, clamped at [0, marks]
+    const unitValue = marks / correctCount;
+    let earned = (rightSelected - wrongSelected) * unitValue;
+    earned = Math.max(0, Math.min(marks, earned));
+    const marksAwarded = Math.round(earned * 100) / 100;
+
+    return { answered: true, isCorrect, marksAwarded };
   }
 
   if (qType === QUESTION_TYPES.TRUE_FALSE) {
@@ -913,6 +1175,32 @@ export function evaluateQuestionAnswer(questionRow, answerRow, negativeMark = 0)
     if (!answered) return { answered: false, isCorrect: false, marksAwarded: 0 };
     const isCorrect = selected === Boolean(answerKey.correct_answer);
     return { answered: true, isCorrect, marksAwarded: isCorrect ? marks : -penalty };
+  }
+
+  if (qType === QUESTION_TYPES.FILL_BLANK) {
+    const blanks = isPlainObject(answerData?.blanks) ? answerData.blanks : null;
+    const answered = blanks !== null && Object.values(blanks).some((v) => typeof v === 'string' && v.trim().length > 0);
+    if (!answered) return { answered: false, isCorrect: false, marksAwarded: 0 };
+
+    const expectedBlanks = isPlainObject(answerKey.blanks) ? answerKey.blanks : {};
+    const blankKeys = Object.keys(expectedBlanks);
+    if (blankKeys.length === 0) return { answered: true, isCorrect: true, marksAwarded: marks };
+
+    const caseSensitive = Boolean(answerKey.case_sensitive);
+    let allCorrect = true;
+    for (const bId of blankKeys) {
+      const studentVal = String(blanks[bId] ?? blanks[bId.toLowerCase()] ?? '').trim().normalize('NFC');
+      const acceptedList = Array.isArray(expectedBlanks[bId]) ? expectedBlanks[bId] : [expectedBlanks[bId]];
+      const matches = acceptedList.some((acc) => {
+        const target = String(acc ?? '').trim().normalize('NFC');
+        return caseSensitive ? target === studentVal : target.toLowerCase() === studentVal.toLowerCase();
+      });
+      if (!matches) {
+        allCorrect = false;
+        break;
+      }
+    }
+    return { answered: true, isCorrect: allCorrect, marksAwarded: allCorrect ? marks : -penalty };
   }
 
   if (qType === QUESTION_TYPES.SHORT_ANSWER) {
@@ -1061,7 +1349,7 @@ export function migrateSqliteDatabase(db) {
   // Check if questions table needs constraint upgrade (legacy table had strict CHECK (correct_option IN ('A','B','C','D')) without question_type condition)
   const tableMaster = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='questions'").get();
   const tableSql = String(tableMaster?.sql || '');
-  const needsTableRebuild = !tableSql.includes('questions_type_check') && !tableSql.includes("question_type = 'mcq_single'");
+  const needsTableRebuild = !tableSql.includes('questions_type_check') || !tableSql.includes('fill_blank');
 
   if (needsTableRebuild) {
     db.pragma('foreign_keys = OFF');
@@ -1085,7 +1373,7 @@ export function migrateSqliteDatabase(db) {
             difficulty TEXT NOT NULL DEFAULT '',
             explanation TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            CONSTRAINT questions_type_check CHECK (question_type IN ('mcq_single','mcq_multi','true_false','short_answer','numeric','matching','ordering')),
+            CONSTRAINT questions_type_check CHECK (question_type IN ('mcq_single','mcq_multi','true_false','fill_blank','short_answer','numeric','matching','ordering')),
             CONSTRAINT questions_correct_option_check CHECK ((question_type = 'mcq_single' AND correct_option IN ('A','B','C','D')) OR (question_type != 'mcq_single' AND (correct_option = '' OR correct_option IN ('A','B','C','D'))))
           );
           INSERT INTO __new_questions (
@@ -1170,3 +1458,245 @@ export function migrateSqliteDatabase(db) {
     db.exec(SQLITE_QUESTIONS_TRIGGERS_SQL);
   })();
 }
+
+export function parseQuestionPaste(text, subject) {
+  const errors = [];
+  const normalizedText = String(text ?? '').trim();
+  if (!normalizedText) return { questions: [], errors: ['Paste at least one formatted question.'] };
+  const blocks = normalizedText.split(/\r?\n\s*\r?\n/).map((block) => block.trim()).filter(Boolean);
+  if (blocks.length > 300) errors.push('A maximum of 300 questions can be imported at a time.');
+  const questions = [];
+
+  blocks.forEach((block, index) => {
+    const lines = block.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0);
+    const questionNumber = index + 1;
+    const details = [];
+
+    // First line must be sequential question number: N. Question text or N) Question text
+    const start = lines[0]?.match(/^(\d+)[.)]\s+(.+)$/);
+    if (!start) details.push('Use "N. Question" for the question line.');
+    else if (Number(start[1]) !== questionNumber) details.push(`Question numbers must be sequential (expected ${questionNumber}).`);
+
+    let questionText = start?.[2] ?? '';
+    let questionType = '';
+    let category = subject;
+    let difficulty = '';
+    let explanation = '';
+    let media = null;
+    let stimulus = null;
+    const options = {};
+    let answer = '';
+    let tolerance = 0;
+    const orderingItems = [];
+    const matchingPairs = [];
+
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i];
+      const typeMatch = line.match(/^Type:\s*(.+)$/i);
+      const subjectMatch = line.match(/^(?:Subject|Category):\s*(.+)$/i);
+      const diffMatch = line.match(/^Difficulty:\s*(.+)$/i);
+      const expMatch = line.match(/^Explanation:\s*(.*)$/i);
+      const ansMatch = line.match(/^Answer:\s*(.+)$/i);
+      const mediaMatch = line.match(/^Media:\s*(.+)$/i);
+      const stimMatch = line.match(/^Stimulus:\s*(.+)$/i);
+      const optMatch = line.match(/^([A-H])[.)]\s*(.+)$/i);
+      const numMatch = line.match(/^(\d+)[.)]\s*(.+)$/);
+      const tolMatch = line.match(/^Tolerance:\s*([\d.]+)$/i);
+      const matchPair = line.match(/^(?:(?:Match|Pair):\s*)?(.+?)\s*(?:->|=>)\s*(.+)$/i);
+
+      if (typeMatch) {
+        questionType = typeMatch[1].trim().toLowerCase();
+      } else if (subjectMatch) {
+        category = subjectMatch[1].trim();
+      } else if (diffMatch) {
+        difficulty = diffMatch[1].trim();
+      } else if (expMatch) {
+        explanation = expMatch[1].trim();
+      } else if (ansMatch) {
+        answer = ansMatch[1].trim();
+      } else if (tolMatch) {
+        tolerance = Number(tolMatch[1]);
+      } else if (mediaMatch) {
+        const rawMedia = mediaMatch[1].trim();
+        if (/\[image:\s*placeholder\]/i.test(rawMedia) || /^image\s+placeholder$/i.test(rawMedia)) {
+          media = { type: 'image', placeholder: true };
+        } else if (/\[audio:\s*placeholder\]/i.test(rawMedia) || /^audio\s+placeholder$/i.test(rawMedia)) {
+          media = { type: 'audio', placeholder: true };
+        } else {
+          const type = /\.(mp3|wav|ogg|aac|m4a)$/i.test(rawMedia) || /^data:audio\//i.test(rawMedia) ? 'audio' : 'image';
+          media = { type, url: rawMedia };
+        }
+      } else if (stimMatch) {
+        const stimText = stimMatch[1].trim();
+        const parts = stimText.split('|').map((s) => s.trim());
+        if (parts.length > 1) {
+          stimulus = { title: parts[0], text: parts.slice(1).join(' | ') };
+        } else {
+          stimulus = { text: stimText };
+        }
+      } else if (matchPair) {
+        matchingPairs.push({
+          prompt: matchPair[1].replace(/^(?:Match|Pair):\s*/i, '').trim(),
+          choice: matchPair[2].trim(),
+        });
+      } else if (optMatch) {
+        const letter = optMatch[1].toUpperCase();
+        options[`option_${letter.toLowerCase()}`] = optMatch[2].trim();
+      } else if (numMatch) {
+        orderingItems.push({ id: `I${numMatch[1]}`, text: numMatch[2].trim() });
+      }
+    }
+
+    // Infer questionType if omitted
+    if (!questionType) {
+      if (matchingPairs.length > 0) {
+        questionType = QUESTION_TYPES.MATCHING;
+      } else if (Object.keys(options).length > 0) {
+        questionType = answer.includes(',') ? QUESTION_TYPES.MCQ_MULTI : QUESTION_TYPES.MCQ_SINGLE;
+      } else if (answer.toLowerCase() === 'true' || answer.toLowerCase() === 'false' || answer.toLowerCase() === 'yes' || answer.toLowerCase() === 'no') {
+        questionType = QUESTION_TYPES.TRUE_FALSE;
+      } else if (/\[blank\d*\]|___|{{blank\d*}}/i.test(questionText)) {
+        questionType = QUESTION_TYPES.FILL_BLANK;
+      } else if (orderingItems.length > 0) {
+        questionType = QUESTION_TYPES.ORDERING;
+      } else if (Number.isFinite(Number(answer)) && answer !== '') {
+        questionType = QUESTION_TYPES.NUMERIC;
+      } else if (answer) {
+        questionType = QUESTION_TYPES.SHORT_ANSWER;
+      } else {
+        questionType = QUESTION_TYPES.MCQ_SINGLE;
+      }
+    }
+
+    // Alias mapping
+    if (questionType === 'fill_blanks' || questionType === 'fill-in-the-blank' || questionType === 'fill_in_the_blank') {
+      questionType = QUESTION_TYPES.FILL_BLANK;
+    } else if (questionType === 'yes_no') {
+      questionType = QUESTION_TYPES.TRUE_FALSE;
+    } else if (questionType === 'rearrangement') {
+      questionType = QUESTION_TYPES.ORDERING;
+    } else if (questionType === 'match' || questionType === 'matching_pairs') {
+      questionType = QUESTION_TYPES.MATCHING;
+    }
+
+    const payload = {
+      question_text: questionText,
+      question_type: questionType,
+      category,
+      difficulty,
+      explanation,
+      media,
+      stimulus,
+    };
+
+    if (questionType === QUESTION_TYPES.MCQ_SINGLE) {
+      payload.option_a = options.option_a || '';
+      payload.option_b = options.option_b || '';
+      payload.option_c = options.option_c || '';
+      payload.option_d = options.option_d || '';
+      payload.correct_option = answer.toUpperCase();
+    } else if (questionType === QUESTION_TYPES.MCQ_MULTI) {
+      const opts = Object.keys(options)
+        .sort()
+        .map((k) => ({ id: k.replace('option_', '').toUpperCase(), text: options[k] }));
+      const correctArr = answer.split(/[,;\s]+/).map((s) => s.trim().toUpperCase()).filter(Boolean);
+      payload.question_config = { options: opts };
+      payload.answer_key = { correct_options: correctArr };
+    } else if (questionType === QUESTION_TYPES.TRUE_FALSE) {
+      const lower = answer.toLowerCase();
+      const boolVal = lower === 'true' || lower === 'yes';
+      payload.answer_key = { correct_answer: boolVal };
+    } else if (questionType === QUESTION_TYPES.FILL_BLANK) {
+      payload.question_config = { case_sensitive: false };
+      payload.answer_key = { accepted_answers: answer };
+    } else if (questionType === QUESTION_TYPES.SHORT_ANSWER) {
+      const accepted = answer.split('|').map((s) => s.trim()).filter(Boolean);
+      payload.answer_key = { accepted_answers: accepted };
+    } else if (questionType === QUESTION_TYPES.NUMERIC) {
+      payload.answer_key = { value: Number(answer), tolerance: tolerance || 0 };
+    } else if (questionType === QUESTION_TYPES.ORDERING) {
+      const rawOrder = answer.split(/[,;\s]+/).map((s) => s.trim()).filter(Boolean);
+      const orderIds = rawOrder.map((tok) => tok.startsWith('I') ? tok.toUpperCase() : `I${tok}`);
+      payload.question_config = { items: orderingItems.length ? orderingItems : orderIds.map((id, idx) => ({ id, text: `Item ${idx + 1}` })) };
+      payload.answer_key = { correct_order: orderIds };
+    } else if (questionType === QUESTION_TYPES.MATCHING) {
+      const prompts = matchingPairs.map((p, idx) => ({ id: `P${idx + 1}`, text: p.prompt }));
+      const choices = matchingPairs.map((p, idx) => ({ id: `C${idx + 1}`, text: p.choice }));
+      const pairs = {};
+      matchingPairs.forEach((p, idx) => {
+        pairs[`P${idx + 1}`] = `C${idx + 1}`;
+      });
+      if (answer && answer.includes('=')) {
+        answer.split(/[,;\s]+/).forEach((pair) => {
+          const [p, c] = pair.split('=').map((s) => s.trim().toUpperCase());
+          if (p && c) pairs[p] = c;
+        });
+      }
+      payload.question_config = { prompts, choices };
+      payload.answer_key = { pairs };
+    }
+
+    const { question, errors: questionErrors } = normalizeQuestion(payload);
+    details.push(...questionErrors);
+    if (details.length) details.forEach((err) => errors.push(`Question ${questionNumber}: ${err}`));
+    else questions.push(question);
+  });
+
+  return { questions, errors };
+}
+
+export const BULK_PASTE_SAMPLE = `1. What is the capital of France?
+A. Rome
+B. Paris
+C. Madrid
+D. Berlin
+Answer: B
+Explanation: Paris is the capital of France.
+
+2. Which of the following numbers are prime?
+Type: mcq_multi
+A. 2
+B. 3
+C. 4
+D. 9
+Answer: A, B
+Explanation: 2 and 3 are prime numbers.
+
+3. The Earth revolves around the Sun.
+Type: true_false
+Answer: True
+Explanation: Earth completes an orbit around the Sun in approximately 365.25 days.
+
+4. The chemical symbol for water is [blank].
+Type: fill_blank
+Answer: H2O
+Explanation: Water is composed of two hydrogen atoms and one oxygen atom.
+
+5. What is the powerhouse of the cell?
+Type: short_answer
+Answer: Mitochondria
+Explanation: Mitochondria generate most of the chemical energy needed by the cell.
+
+6. What is the standard acceleration due to gravity on Earth in m/s^2?
+Type: numeric
+Answer: 9.8
+Tolerance: 0.1
+Explanation: Standard Earth gravity is approximately 9.8 m/s^2.
+
+7. Arrange the lifecycle stages of a butterfly in correct chronological order.
+Type: ordering
+1. Egg
+2. Caterpillar
+3. Pupa
+4. Adult butterfly
+Answer: 1, 2, 3, 4
+Explanation: Complete metamorphosis progresses from egg to caterpillar, pupa, and adult.
+
+8. Match each country with its capital city.
+Type: matching
+Match: France -> Paris
+Match: Germany -> Berlin
+Match: Japan -> Tokyo
+Explanation: Paris is in France, Berlin in Germany, and Tokyo in Japan.`;
+
+

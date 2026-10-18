@@ -337,7 +337,9 @@ test('MCQ requirements work through the local API and persist in SQLite', { time
     assert.equal((await anonymous('/api/admin/login', { method: 'POST', body: { username: 'admin', password: 'updatedPass123!' } })).status, 200);
   } finally {
     await stopServer(running?.process);
-    if (path.dirname(databasePath) === directory && directory.startsWith(os.tmpdir())) await rm(directory, { recursive: true, force: true });
+    if (path.dirname(databasePath) === directory && directory.startsWith(os.tmpdir())) {
+      await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
   }
 });
 

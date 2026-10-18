@@ -5,6 +5,7 @@ export const QUESTION_TYPE_VALUES = [
   'mcq_single',
   'mcq_multi',
   'true_false',
+  'fill_blank',
   'short_answer',
   'numeric',
   'matching',
@@ -31,7 +32,7 @@ export const questions = sqliteTable('questions', {
 }, (table) => [
   check(
     'questions_type_check',
-    sql`${table.question_type} IN ('mcq_single','mcq_multi','true_false','short_answer','numeric','matching','ordering')`,
+    sql`${table.question_type} IN ('mcq_single','mcq_multi','true_false','fill_blank','short_answer','numeric','matching','ordering')`,
   ),
   check(
     'questions_correct_option_check',

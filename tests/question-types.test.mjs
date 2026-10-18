@@ -14,6 +14,12 @@ import {
   hydrateAnswerRow,
   validateStudentAnswer,
   evaluateQuestionAnswer,
+  parseQuestionPaste,
+  sanitizeRichText,
+  formatQuestionBlanks,
+  cleanQuestionBlanks,
+  renderQuestionText,
+  BULK_PASTE_SAMPLE,
   migrateSqliteDatabase,
 } from '../server/question-types.js';
 
@@ -139,6 +145,7 @@ test('stable question-type identifiers and legacy MCQ normalization work lossles
     'mcq_single',
     'mcq_multi',
     'true_false',
+    'fill_blank',
     'short_answer',
     'numeric',
     'matching',
@@ -643,3 +650,200 @@ test('SQLite and D1 migrations upgrade populated legacy databases losslessly and
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test('fair deterministic partial credit algorithm for multi-select MCQs', () => {
+  // 1 mark question with 2 correct answers (A, B) out of 4 options
+  const qRow = {
+    question_type: QUESTION_TYPES.MCQ_MULTI,
+    marks: 1,
+    question_config: JSON.stringify({
+      options: [
+        { id: 'A', text: 'Opt A' },
+        { id: 'B', text: 'Opt B' },
+        { id: 'C', text: 'Opt C' },
+        { id: 'D', text: 'Opt D' },
+      ],
+    }),
+    answer_key: JSON.stringify({ correct_options: ['A', 'B'] }),
+  };
+
+  // Full credit: selects A, B
+  const full = evaluateQuestionAnswer(qRow, { answer_data: JSON.stringify({ selected_options: ['A', 'B'] }) }, 0.25);
+  assert.equal(full.isCorrect, true);
+  assert.equal(full.marksAwarded, 1);
+
+  // Partial credit: selects A (1 right, 0 wrong -> (1 - 0) * 0.5 = 0.5)
+  const half = evaluateQuestionAnswer(qRow, { answer_data: JSON.stringify({ selected_options: ['A'] }) }, 0.25);
+  assert.equal(half.isCorrect, false);
+  assert.equal(half.marksAwarded, 0.5);
+
+  // 1 right, 1 wrong -> (1 - 1) * 0.5 = 0
+  const zeroNet = evaluateQuestionAnswer(qRow, { answer_data: JSON.stringify({ selected_options: ['A', 'C'] }) }, 0.25);
+  assert.equal(zeroNet.isCorrect, false);
+  assert.equal(zeroNet.marksAwarded, 0);
+
+  // Clamped at 0 (zero double penalties): 0 right, 2 wrong -> clamped to 0, not negative
+  const clampedZero = evaluateQuestionAnswer(qRow, { answer_data: JSON.stringify({ selected_options: ['C', 'D'] }) }, 0.25);
+  assert.equal(clampedZero.isCorrect, false);
+  assert.equal(clampedZero.marksAwarded, 0);
+
+  // 2 right, 1 wrong -> (2 - 1) * 0.5 = 0.5
+  const withDistractor = evaluateQuestionAnswer(qRow, { answer_data: JSON.stringify({ selected_options: ['A', 'B', 'C'] }) }, 0.25);
+  assert.equal(withDistractor.isCorrect, false);
+  assert.equal(withDistractor.marksAwarded, 0.5);
+
+  // Unanswered -> 0 marks
+  const unans = evaluateQuestionAnswer(qRow, null, 0.25);
+  assert.equal(unans.answered, false);
+  assert.equal(unans.marksAwarded, 0);
+});
+
+test('fill-in-the-blank question evaluation with NFC normalization, trimming, and all-or-nothing scoring', () => {
+  const qRow = {
+    question_type: QUESTION_TYPES.FILL_BLANK,
+    marks: 2,
+    question_config: JSON.stringify({
+      blanks: [
+        { id: 'B1', label: 'Blank 1' },
+        { id: 'B2', label: 'Blank 2' },
+      ],
+      case_sensitive: false,
+    }),
+    answer_key: JSON.stringify({
+      blanks: {
+        B1: ['H2O', 'water'],
+        B2: ['CO2', 'carbon dioxide'],
+      },
+      case_sensitive: false,
+    }),
+  };
+
+  // Both correct with trimming and case variation
+  const correct = evaluateQuestionAnswer(qRow, {
+    answer_data: JSON.stringify({
+      blanks: { B1: '  h2o  ', B2: 'CARBON DIOXIDE ' },
+    }),
+  }, 0.5);
+  assert.equal(correct.isCorrect, true);
+  assert.equal(correct.marksAwarded, 2);
+
+  // One right, one wrong -> all-or-nothing (penalty applied if configured)
+  const partial = evaluateQuestionAnswer(qRow, {
+    answer_data: JSON.stringify({
+      blanks: { B1: 'H2O', B2: 'wrong' },
+    }),
+  }, 0.5);
+  assert.equal(partial.isCorrect, false);
+  assert.equal(partial.marksAwarded, -0.5);
+
+  // Unicode NFC normalization test
+  const nfcRow = {
+    question_type: QUESTION_TYPES.FILL_BLANK,
+    marks: 1,
+    question_config: JSON.stringify({ blanks: [{ id: 'B1' }], case_sensitive: true }),
+    answer_key: JSON.stringify({ blanks: { B1: ['café'] }, case_sensitive: true }),
+  };
+  // 'cafe\u0301' is decomposed NFD, should match composed 'café' NFC
+  const nfcMatch = evaluateQuestionAnswer(nfcRow, {
+    answer_data: JSON.stringify({ blanks: { B1: 'cafe\u0301' } }),
+  }, 0);
+  assert.equal(nfcMatch.isCorrect, true);
+});
+
+test('rich-text sanitization preserves allowed formatting and strips malicious tags', () => {
+  const clean = sanitizeRichText('This is <b>bold</b>, <i>italic</i>, <u>underlined</u>, <del>strike</del>, and <code>code</code>.');
+  assert.equal(clean, 'This is <b>bold</b>, <i>italic</i>, <u>underlined</u>, <del>strike</del>, and <code>code</code>.');
+
+  const stripped = sanitizeRichText('<script>alert("xss")</script><iframe src="malicious.html"></iframe><p>Safe</p><video src="test.mp4"></video>');
+  assert.ok(!stripped.includes('<script>'));
+  assert.ok(!stripped.includes('alert'));
+  assert.ok(!stripped.includes('iframe'));
+  assert.ok(!stripped.includes('video'));
+});
+
+test('multi-type bulk text paste validates sequentially, supports media placeholders, and enforces atomic failure', () => {
+  const validPaste = `1. What is single MCQ?\nA. Alpha\nB. Beta\nC. Gamma\nD. Delta\nAnswer: A\nExplanation: Alpha is correct.\n\n2. Which are prime?\nType: mcq_multi\nA. 2\nB. 3\nC. 4\nAnswer: A, B\n\n3. The Earth is flat.\nType: true_false\nAnswer: False\n\n4. Symbol for water is [blank].\nType: fill_blank\nAnswer: H2O\nMedia: [image: placeholder]\n\n5. Arrange steps.\nType: ordering\n1. First\n2. Second\nAnswer: 1, 2`;
+
+  const { questions, errors } = parseQuestionPaste(validPaste, 'General');
+  assert.deepEqual(errors, []);
+  assert.equal(questions.length, 5);
+  assert.equal(questions[0].question_type, 'mcq_single');
+  assert.equal(questions[1].question_type, 'mcq_multi');
+  assert.equal(questions[2].question_type, 'true_false');
+  assert.equal(questions[3].question_type, 'fill_blank');
+  const parsedMedia = JSON.parse(questions[3].media);
+  assert.equal(parsedMedia.type, 'image');
+  assert.equal(parsedMedia.placeholder, true);
+  assert.equal(questions[4].question_type, 'ordering');
+
+  // Non-sequential numbering fails
+  const nonSeq = `1. First question?\nA. 1\nB. 2\nC. 3\nD. 4\nAnswer: A\n\n3. Jumped question?\nA. 1\nB. 2\nC. 3\nD. 4\nAnswer: B`;
+  const nonSeqRes = parseQuestionPaste(nonSeq, 'General');
+  assert.ok(nonSeqRes.errors.length > 0);
+  assert.ok(nonSeqRes.errors.some((e) => e.includes('sequential')));
+});
+
+test('fill-in-the-blank placeholders render like long underlined space ________', () => {
+  const rendered = renderQuestionText('The chemical symbol for water is [blank].');
+  assert.equal(rendered, 'The chemical symbol for water is <span class="blank-underline">________</span>.');
+
+  const multiBlanks = renderQuestionText('Photosynthesis produces [blank1] and [blank2].');
+  assert.equal(multiBlanks, 'Photosynthesis produces <span class="blank-underline">________</span> and <span class="blank-underline">________</span>.');
+
+  const formatted = renderQuestionText('The symbol for water is <b>[blank]</b>.');
+  assert.equal(formatted, 'The symbol for water is <b><span class="blank-underline">________</span></b>.');
+
+  const clean = cleanQuestionBlanks('The chemical symbol for water is [blank].');
+  assert.equal(clean, 'The chemical symbol for water is ________.');
+});
+
+test('BULK_PASTE_SAMPLE includes one example for every supported question type and parses cleanly', () => {
+  const { questions, errors } = parseQuestionPaste(BULK_PASTE_SAMPLE, 'General Knowledge');
+  assert.deepEqual(errors, []);
+  assert.equal(questions.length, SUPPORTED_QUESTION_TYPES.length);
+
+  const presentTypes = new Set(questions.map((q) => q.question_type));
+  for (const expectedType of SUPPORTED_QUESTION_TYPES) {
+    assert.ok(
+      presentTypes.has(expectedType),
+      `Expected BULK_PASTE_SAMPLE to include an example for question type "${expectedType}"`
+    );
+  }
+
+  // Verify each question type's parsed specifics
+  assert.equal(questions[0].question_type, QUESTION_TYPES.MCQ_SINGLE);
+  assert.equal(questions[0].correct_option, 'B');
+
+  assert.equal(questions[1].question_type, QUESTION_TYPES.MCQ_MULTI);
+  const q1Config = JSON.parse(questions[1].question_config);
+  const q1Key = JSON.parse(questions[1].answer_key);
+  assert.equal(q1Config.options.length, 4);
+  assert.deepEqual(q1Key.correct_options, ['A', 'B']);
+
+  assert.equal(questions[2].question_type, QUESTION_TYPES.TRUE_FALSE);
+  const q2Key = JSON.parse(questions[2].answer_key);
+  assert.equal(q2Key.correct_answer, true);
+
+  assert.equal(questions[3].question_type, QUESTION_TYPES.FILL_BLANK);
+  const q3Key = JSON.parse(questions[3].answer_key);
+  assert.deepEqual(q3Key.blanks.B1, ['H2O']);
+
+  assert.equal(questions[4].question_type, QUESTION_TYPES.SHORT_ANSWER);
+  const q4Key = JSON.parse(questions[4].answer_key);
+  assert.deepEqual(q4Key.accepted_answers, ['Mitochondria']);
+
+  assert.equal(questions[5].question_type, QUESTION_TYPES.NUMERIC);
+  const q5Key = JSON.parse(questions[5].answer_key);
+  assert.equal(q5Key.value, 9.8);
+  assert.equal(q5Key.tolerance, 0.1);
+
+  assert.equal(questions[6].question_type, QUESTION_TYPES.ORDERING);
+  const q6Key = JSON.parse(questions[6].answer_key);
+  assert.deepEqual(q6Key.correct_order, ['I1', 'I2', 'I3', 'I4']);
+
+  assert.equal(questions[7].question_type, QUESTION_TYPES.MATCHING);
+  const q7Key = JSON.parse(questions[7].answer_key);
+  assert.deepEqual(q7Key.pairs, { P1: 'C1', P2: 'C2', P3: 'C3' });
+});
+
+

@@ -9,68 +9,159 @@ import {
   hydrateAnswerRow,
   validateStudentAnswer,
   evaluateQuestionAnswer,
+  validateQuestionMedia,
+  parseQuestionPaste,
   buildLegacyMcqConfig,
   buildLegacyMcqAnswerKey,
 } from '../server/question-types.js';
 
 const app = new Hono();
-const templateHeaders = ['Question', 'Option A', 'Option B', 'Option C', 'Option D', 'Correct Answer', 'Category', 'Difficulty', 'Explanation'];
-const optionalImportHeaders = ['Question Type', 'Question Config', 'Answer Key', 'Media'];
+const templateHeaders = [
+  'Question',
+  'Question Type',
+  'Option A',
+  'Option B',
+  'Option C',
+  'Option D',
+  'Correct Answer',
+  'Category',
+  'Difficulty',
+  'Explanation',
+  'Question Config',
+  'Answer Key',
+  'Media',
+];
+const optionalImportHeaders = ['Question Config', 'Answer Key', 'Media'];
+
+const templateSampleRows = [
+  [
+    'What is the capital of Bangladesh?',
+    'mcq_single',
+    'Dhaka',
+    'Chittagong',
+    'Sylhet',
+    'Rajshahi',
+    'A',
+    'General Knowledge',
+    'Easy',
+    'Dhaka has been the capital since 1971.',
+    '',
+    '',
+    '',
+  ],
+  [
+    'Which of the following numbers are prime?',
+    'mcq_multi',
+    '2',
+    '3',
+    '4',
+    '6',
+    'A, B',
+    'Mathematics',
+    'Medium',
+    '2 and 3 are prime numbers.',
+    '{"options":[{"id":"A","text":"2"},{"id":"B","text":"3"},{"id":"C","text":"4"},{"id":"D","text":"6"}]}',
+    '{"correct_options":["A","B"]}',
+    '',
+  ],
+  [
+    'The Earth revolves around the Sun.',
+    'true_false',
+    'True',
+    'False',
+    '',
+    '',
+    'True',
+    'General Science',
+    'Easy',
+    'The Earth orbits the Sun in approximately 365.25 days.',
+    '',
+    '',
+    '',
+  ],
+  [
+    'The chemical symbol for water is [blank].',
+    'fill_blank',
+    '',
+    '',
+    '',
+    '',
+    'H2O',
+    'Chemistry',
+    'Easy',
+    'Water consists of 2 hydrogen and 1 oxygen atom.',
+    '{"blanks":[{"id":"B1","label":"Blank 1"}]}',
+    '{"blanks":{"B1":["H2O","h2o"]}}',
+    '',
+  ],
+  [
+    'What is the powerhouse of the cell?',
+    'short_answer',
+    '',
+    '',
+    '',
+    '',
+    'Mitochondria',
+    'Biology',
+    'Medium',
+    'Mitochondria generate ATP energy for cellular processes.',
+    '',
+    '',
+    '',
+  ],
+  [
+    'What is standard gravity on Earth in m/s^2 (approx)?',
+    'numeric',
+    '',
+    '',
+    '',
+    '',
+    '9.8',
+    'Physics',
+    'Medium',
+    'Standard gravity is 9.80665 m/s^2.',
+    '{"tolerance":0.1,"unit":"m/s^2"}',
+    '{"value":9.8,"tolerance":0.1}',
+    '',
+  ],
+  [
+    'Match chemical formulas to common compound names.',
+    'matching',
+    '',
+    '',
+    '',
+    '',
+    '',
+    'Chemistry',
+    'Hard',
+    'H2O is water, NaCl is salt.',
+    '{"prompts":[{"id":"P1","text":"H2O"},{"id":"P2","text":"NaCl"}],"choices":[{"id":"C1","text":"Salt"},{"id":"C2","text":"Water"}]}',
+    '{"pairs":{"P1":"C2","P2":"C1"}}',
+    '',
+  ],
+  [
+    'Arrange butterfly lifecycle stages sequentially.',
+    'ordering',
+    '',
+    '',
+    '',
+    '',
+    '',
+    'Biology',
+    'Easy',
+    'Order: Egg -> Caterpillar -> Pupa -> Butterfly.',
+    '{"items":[{"id":"I1","text":"Egg"},{"id":"I2","text":"Caterpillar"},{"id":"I3","text":"Pupa"},{"id":"I4","text":"Butterfly"}]}',
+    '{"correct_order":["I1","I2","I3","I4"]}',
+    '',
+  ],
+];
+
 const sessionSeconds = 8 * 60 * 60;
 const allowedNegativeMarks = [0, 1, 0.25, 0.5];
 const passwordIterations = 210000;
 
 function apiError(c, status, error, details) {
   return c.json({ error, ...(details ? { details } : {}) }, status);
-}
-
-function parseBulkQuestions(text, subject) {
-  const normalized = String(text ?? '').trim();
-  if (!normalized) return { questions: [], errors: ['Paste at least one formatted question.'] };
-  const blocks = normalized.split(/\r?\n\s*\r?\n/).map((block) => block.trim()).filter(Boolean);
-  const questions = [];
-  const errors = [];
-  if (blocks.length > 300) errors.push('A maximum of 300 questions can be imported at a time.');
-  blocks.forEach((block, blockIndex) => {
-    const lines = block.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0);
-    const questionNumber = blockIndex + 1;
-    const details = [];
-    const heading = lines[0]?.match(/^(\d+)[.)]\s+(.+)$/);
-    if (!heading) details.push('Use "N. Question" for the question line.');
-    else if (Number(heading[1]) !== questionNumber) details.push(`Question numbers must be sequential (expected ${questionNumber}).`);
-
-    const optionLines = lines.slice(1, 5);
-    const options = {};
-    for (const [offset, expected] of ['A', 'B', 'C', 'D'].entries()) {
-      const match = optionLines[offset]?.match(/^([A-D])[.)]\s*(.+)$/i);
-      if (!match || match[1].toUpperCase() !== expected) details.push(`Option ${expected} is required in order.`);
-      else options[`option_${expected.toLowerCase()}`] = match[2].trim();
-    }
-
-    let answer;
-    let explanation = '';
-    const answerLine = lines[5]?.match(/^Answer:\s*([A-D])\s*$/i);
-    if (!answerLine) details.push('Add "Answer: A", "Answer: B", "Answer: C" or "Answer: D".');
-    else answer = answerLine[1].toUpperCase();
-    if (lines[6]) {
-      const explanationLine = lines[6].match(/^Explanation:\s*(.*)$/i);
-      if (!explanationLine) details.push('Only an optional "Explanation: ..." line may follow the answer.');
-      else explanation = explanationLine[1].trim();
-    }
-    if (lines.length > 7) details.push('Each question block may contain only a question, four options, an answer and an optional explanation.');
-
-    const { question, errors: questionErrors } = normalizeQuestion({
-      question_text: heading?.[2] ?? '',
-      ...options,
-      correct_option: answer ?? '',
-      category: subject,
-      explanation,
-    });
-    details.push(...questionErrors);
-    if (details.length) details.forEach((error) => errors.push(`Question ${questionNumber}: ${error}`));
-    else questions.push(question);
-  });
-  return { questions, errors };
 }
 
 function b64url(bytes) {
@@ -346,11 +437,67 @@ app.post('/api/admin/questions', requireAdmin, async (c) => {
   return c.json(hydrateQuestionRow(created), 201);
 });
 
+app.post('/api/admin/media/upload', requireAdmin, async (c) => {
+  let file;
+  try {
+    const form = await c.req.raw.formData();
+    file = form.get('file');
+  } catch {
+    return apiError(c, 400, 'Choose a file to upload.');
+  }
+  if (!file || typeof file.arrayBuffer !== 'function') {
+    return apiError(c, 400, 'Choose an image or audio file to upload.');
+  }
+  const mime = String(file.type || '').toLowerCase();
+  const name = String(file.name || '');
+  const isImage = mime.startsWith('image/') || /\.(png|jpe?g|gif|webp|svg)$/i.test(name);
+  const isAudio = mime.startsWith('audio/') || /\.(mp3|wav|ogg|aac|m4a)$/i.test(name);
+  if (!isImage && !isAudio) {
+    return apiError(c, 400, 'Only image and audio file uploads are supported.');
+  }
+  if (mime.includes('video')) {
+    return apiError(c, 400, 'Video uploads are not supported.');
+  }
+  const maxImageSize = 5 * 1024 * 1024;
+  const maxAudioSize = 10 * 1024 * 1024;
+  if (isImage && file.size > maxImageSize) {
+    return apiError(c, 400, 'Image file size must be 5MB or less.');
+  }
+  if (isAudio && file.size > maxAudioSize) {
+    return apiError(c, 400, 'Audio file size must be 10MB or less.');
+  }
+  const buf = await file.arrayBuffer();
+  const bytes = new Uint8Array(buf);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  const b64 = btoa(binary);
+  const fileUrl = `data:${mime || (isImage ? 'image/png' : 'audio/mp3')};base64,${b64}`;
+  return c.json({
+    url: fileUrl,
+    type: isImage ? 'image' : 'audio',
+    filename: name || (isImage ? 'image.png' : 'audio.mp3'),
+    size: file.size,
+    mime,
+  });
+});
+
+app.post('/api/admin/questions/:id/media', requireAdmin, async (c) => {
+  const id = Number(c.req.param('id'));
+  const found = await c.env.DB.prepare('SELECT id FROM questions WHERE archived=0 AND id=?').bind(id).first();
+  if (!found) return apiError(c, 404, 'Question not found.');
+  const body = await c.req.json().catch(() => ({}));
+  const { media, errors } = validateQuestionMedia(body?.media || body);
+  if (errors.length) return apiError(c, 400, 'Invalid media payload.', errors);
+  await c.env.DB.prepare('UPDATE questions SET media=? WHERE id=?').bind(media ? JSON.stringify(media) : null, id).run();
+  const updated = await c.env.DB.prepare(`SELECT q.*, EXISTS(SELECT 1 FROM exam_questions eq WHERE eq.question_id=q.id) AS locked FROM questions q WHERE q.id=?`).bind(id).first();
+  return c.json(hydrateQuestionRow(updated));
+});
+
 app.post('/api/admin/questions/bulk', requireAdmin, async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const subject = String(body.subject ?? '').trim();
   if (!subject) return apiError(c, 400, 'Subject is required.');
-  const { questions, errors } = parseBulkQuestions(body.text, subject);
+  const { questions, errors } = parseQuestionPaste(body.text, subject);
   if (errors.length) return apiError(c, 400, 'Please use the required question format. No questions were imported.', errors);
   await c.env.DB.batch(questions.map((question) => c.env.DB.prepare(`INSERT INTO questions
     (question_text,question_type,option_a,option_b,option_c,option_d,correct_option,question_config,answer_key,media,category,difficulty,explanation) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
@@ -433,7 +580,7 @@ app.delete('/api/admin/questions/:id', requireAdmin, async (c) => {
 
 app.get('/api/admin/questions/template', requireAdmin, (c) => {
   const book = XLSX.utils.book_new();
-  const sheet = XLSX.utils.aoa_to_sheet([templateHeaders]);
+  const sheet = XLSX.utils.aoa_to_sheet([templateHeaders, ...templateSampleRows]);
   sheet['!cols'] = templateHeaders.map((header) => ({ wch: Math.max(header.length + 2, 18) }));
   XLSX.utils.book_append_sheet(book, sheet, 'Questions');
   const bytes = XLSX.write(book, { type: 'array', bookType: 'xlsx' });
@@ -473,8 +620,16 @@ app.post('/api/admin/questions/import', requireAdmin, async (c) => {
   const hasExtensibleHeaders = headerIndexes.has('question') && (
     headerIndexes.has('question type') || headerIndexes.has('question config') || headerIndexes.has('answer key')
   );
-  const requiredHeaders = hasExtensibleHeaders ? ['Question'] : templateHeaders.slice(0, 6);
-  const missing = requiredHeaders.filter((header) => !headerIndexes.has(header.toLowerCase()));
+  let missing = [];
+  if (hasExtensibleHeaders) {
+    if (!headerIndexes.has('question')) missing.push('Question');
+  } else {
+    const legacyRequiredHeaders = ['Question', 'Option A', 'Option B', 'Option C', 'Option D'];
+    missing = legacyRequiredHeaders.filter((header) => !headerIndexes.has(header.toLowerCase()));
+    if (!headerIndexes.has('correct answer') && !headerIndexes.has('correct option')) {
+      missing.push('Correct Answer');
+    }
+  }
   if (missing.length) return apiError(c, 400, `Missing required columns: ${missing.join(', ')}.`);
   const imported = [];
   const errors = [];
@@ -545,6 +700,21 @@ app.post('/api/admin/exams', requireAdmin, async (c) => {
   const distinctCategories = [...new Set((available.results || []).map((q) => q.category).filter(Boolean))];
   const subject = subjectInput || distinctCategories.join(', ') || 'General';
   if (!subject) return apiError(c, 400, 'Subject is required.');
+
+  if (status === 'published') {
+    const selectedQuestions = await c.env.DB.prepare(`SELECT id, media FROM questions WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).all();
+    for (const q of (selectedQuestions.results || [])) {
+      if (q.media) {
+        try {
+          const parsed = JSON.parse(q.media);
+          if (parsed && parsed.placeholder) {
+            return apiError(c, 400, `Cannot publish examination: Question #${q.id} has an unresolved media placeholder. Please attach media before publishing.`);
+          }
+        } catch {}
+      }
+    }
+  }
+
   const created = await c.env.DB.prepare(`INSERT INTO exams (title,description,duration_minutes,subject,negative_mark,status,show_score,show_answers,allow_pdf_download) VALUES (?,?,?,?,?,?,?,?,?)`)
     .bind(title,description,duration,subject,negativeMark,status,showScore,showAnswers,allowPdfDownload).run();
   const examId = created.meta.last_row_id;
@@ -578,7 +748,21 @@ app.delete('/api/admin/attempts/:id', requireAdmin, async (c) => {
 app.patch('/api/admin/exams/:id/status', requireAdmin, async (c) => {
   const status = (await c.req.json().catch(() => ({}))).status;
   if (!['draft','published','closed'].includes(status)) return apiError(c, 400, 'Choose draft, published or closed.');
-  const result = await c.env.DB.prepare('UPDATE exams SET status=? WHERE id=?').bind(status, Number(c.req.param('id'))).run();
+  const examId = Number(c.req.param('id'));
+  if (status === 'published') {
+    const examQuestionsList = await c.env.DB.prepare(`SELECT q.id, q.media FROM exam_questions eq JOIN questions q ON q.id=eq.question_id WHERE eq.exam_id=?`).bind(examId).all();
+    for (const q of (examQuestionsList.results || [])) {
+      if (q.media) {
+        try {
+          const parsed = JSON.parse(q.media);
+          if (parsed && parsed.placeholder) {
+            return apiError(c, 400, `Cannot publish examination: Question #${q.id} has an unresolved media placeholder. Please attach media before publishing.`);
+          }
+        } catch {}
+      }
+    }
+  }
+  const result = await c.env.DB.prepare('UPDATE exams SET status=? WHERE id=?').bind(status, examId).run();
   if (!result.meta.changes) return apiError(c, 404, 'Exam not found.');
   return c.json({ ok: true, status });
 });

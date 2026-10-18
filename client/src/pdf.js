@@ -11,6 +11,8 @@ const optionKeys = { A: 'option_a', B: 'option_b', C: 'option_c', D: 'option_d' 
 export function cleanText(text) {
   if (text === null || text === undefined) return '';
   let str = String(text)
+    .replace(/(?:\[blank[\s\d_:-]*\]|\{\{blank[\s\d_:-]*\}\}|_{3,})/gi, '________')
+    .replace(/<[^>]+>/g, '')
     .replace(/[\u2018\u2019]/g, "'")
     .replace(/[\u201C\u201D]/g, '"')
     .replace(/[\u2013\u2014]/g, '-')

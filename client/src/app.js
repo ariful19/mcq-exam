@@ -1,5 +1,6 @@
 import { LitElement, html } from 'lit';
 import { keyed } from 'lit/directives/keyed.js';
+import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import './style.css';
 import { installMotion, appear, disappear, slideQuestion, setMotionActive, shouldEnableMotion } from './motion.js';
 import { filterAndSortResults } from './results.js';
@@ -29,6 +30,14 @@ import {
   addOrderingItem,
   removeOrderingItem,
   moveOrderingItem,
+  addFillBlank,
+  removeFillBlank,
+  addBlankVariant,
+  removeBlankVariant,
+  sanitizeRichText,
+  formatQuestionBlanks,
+  cleanQuestionBlanks,
+  renderQuestionText,
   syncDraftFromForm,
   validateQuestionDraft,
   formatQuestionTypeBadge,
@@ -37,6 +46,7 @@ import {
   isAnswerProvided,
   formatStudentAnswerSummary,
   formatCorrectAnswerSummary,
+  BULK_PASTE_SAMPLE,
 } from './question-authoring.js';
 
 const letters = ['A', 'B', 'C', 'D'];
@@ -87,6 +97,9 @@ export class McqApp extends LitElement {
     this.categoryFilter = '';
     this.difficultyFilter = '';
     this.typeFilter = '';
+    this.mediaFilter = '';
+    this.attachingMediaQuestion = null;
+    this.orderingInitialState = {};
     this.questionPage = 0;
     this.pageSize = 14;
     this.questionFormOpen = false;
@@ -370,7 +383,13 @@ export class McqApp extends LitElement {
       const matchesCategory = !this.categoryFilter || question.category === this.categoryFilter;
       const matchesDifficulty = !this.difficultyFilter || question.difficulty === this.difficultyFilter;
       const matchesType = !this.typeFilter || qType === this.typeFilter;
-      return matchesText && matchesCategory && matchesDifficulty && matchesType;
+      let matchesMedia = true;
+      if (this.mediaFilter === 'pending') {
+        matchesMedia = Boolean(question.media && question.media.placeholder);
+      } else if (this.mediaFilter === 'with_media') {
+        matchesMedia = Boolean(question.media && !question.media.placeholder && question.media.url);
+      }
+      return matchesText && matchesCategory && matchesDifficulty && matchesType && matchesMedia;
     });
   }
 
@@ -504,6 +523,98 @@ export class McqApp extends LitElement {
     } catch (error) { this.notify(error.message, 'error'); }
   }
 
+  openQuickAttachMedia(question) {
+    this.attachingMediaQuestion = question;
+    this.requestUpdate();
+  }
+
+  renderQuickAttachModal() {
+    const q = this.attachingMediaQuestion;
+    if (!q) return '';
+    return html`<div class="modal-backdrop" @click=${(e) => { if (e.target === e.currentTarget) { this.attachingMediaQuestion = null; this.requestUpdate(); } }}>
+      <section class="modal-card quick-attach-modal" role="dialog" aria-modal="true" aria-labelledby="quick-attach-title">
+        <button class="icon-close modal-close" @click=${() => { this.attachingMediaQuestion = null; this.requestUpdate(); }}>×</button>
+        <span class="eyebrow muted">ATTACH MEDIA · QUESTION #${q.id}</span>
+        <h2 id="quick-attach-title">Attach question media</h2>
+        <p class="modal-intro">${q.question_text}</p>
+        <form class="stack-form" @submit=${async (e) => {
+          e.preventDefault();
+          const form = e.currentTarget;
+          const data = new FormData(form);
+          const url = String(data.get('url') || '').trim();
+          const type = String(data.get('type') || 'image');
+          const alt = String(data.get('alt') || '').trim();
+          const caption = String(data.get('caption') || '').trim();
+          if (!url) {
+            this.notify('Please provide a media URL or upload a file.', 'error');
+            return;
+          }
+          this.busy = true;
+          try {
+            await api(`/api/admin/questions/${q.id}/media`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ media: { type, url, alt, caption } }),
+            });
+            this.attachingMediaQuestion = null;
+            await this.loadAdminData();
+            this.notify(`Media attached to Question #${q.id}.`);
+          } catch (err) {
+            this.notify(err.message, 'error');
+          } finally {
+            this.busy = false;
+            this.requestUpdate();
+          }
+        }}>
+          <div class="field-row">
+            <label>Media type
+              <select name="type">
+                <option value="image">Image</option>
+                <option value="audio">Audio clip</option>
+              </select>
+            </label>
+            <label class="button button-outline upload-button" style="align-self: flex-end; margin-bottom: 0;">
+              ↑ <span>Upload local file</span>
+              <input type="file" accept="image/*,audio/*" style="display:none" @change=${async (e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                const uploadForm = new FormData();
+                uploadForm.append('file', file);
+                this.busy = true;
+                try {
+                  const res = await api('/api/admin/media/upload', { method: 'POST', body: uploadForm });
+                  const urlInput = this.querySelector?.('.quick-attach-modal [name="url"]');
+                  const typeInput = this.querySelector?.('.quick-attach-modal [name="type"]');
+                  if (urlInput) urlInput.value = res.url;
+                  if (typeInput) typeInput.value = res.type;
+                  this.notify('File uploaded. Click Save media attachment to finish.');
+                } catch (err) {
+                  this.notify(err.message, 'error');
+                } finally {
+                  this.busy = false;
+                  this.requestUpdate();
+                }
+              }} />
+            </label>
+          </div>
+          <label>Media URL or uploaded path
+            <input name="url" required placeholder="https://... or /uploads/..." />
+          </label>
+          <label>Alt text (for accessibility)
+            <input name="alt" placeholder="Describe the image" />
+          </label>
+          <label>Caption (optional)
+            <input name="caption" placeholder="Optional caption" />
+          </label>
+          <div class="editor-actions">
+            <button type="button" class="button button-quiet" @click=${() => { this.attachingMediaQuestion = null; this.requestUpdate(); }}>Cancel</button>
+            <button class="button button-primary" ?disabled=${this.busy}>${this.busy ? 'Saving…' : 'Save media attachment'}</button>
+          </div>
+        </form>
+      </section>
+    </div>`;
+  }
+
   async importWorkbook(event) {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -542,6 +653,34 @@ export class McqApp extends LitElement {
       this.notify(`${result.imported} questions uploaded successfully.`);
     } catch (error) { this.notify(error.message, 'error', error.details || []); }
     finally { this.busy = false; this.requestUpdate(); }
+  }
+
+  async copyBulkSample() {
+    try {
+      await navigator.clipboard.writeText(BULK_PASTE_SAMPLE);
+      this.notify('Format sample copied to clipboard.');
+    } catch {
+      const ta = document.createElement('textarea');
+      ta.value = BULK_PASTE_SAMPLE;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+      this.notify('Format sample copied to clipboard.');
+    }
+  }
+
+  loadBulkSample(event) {
+    const form = event.currentTarget.closest('form');
+    if (form) {
+      const textarea = form.querySelector('textarea[name="text"]');
+      const subjectInput = form.querySelector('input[name="subject"]');
+      if (textarea) textarea.value = BULK_PASTE_SAMPLE;
+      if (subjectInput && !subjectInput.value.trim()) subjectInput.value = 'General Knowledge';
+      this.notify('Format sample inserted into editor.');
+    }
   }
 
   toggleSelectedQuestion(id, checked) {
@@ -1143,6 +1282,7 @@ export class McqApp extends LitElement {
         ${this.renderCustomMessage()}
         ${this.startingExam ? this.renderStartDialog() : ''}
         ${this.submitConfirmOpen ? this.renderSubmitConfirmDialog() : ''}
+        ${this.attachingMediaQuestion ? this.renderQuickAttachModal() : ''}
         ${this.toast ? keyed(this.toast, html`<div class="toast ${this.toast.kind}" role="status"><b>${this.toast.message}</b>${this.toast.details?.length ? html`<ul>${this.toast.details.map((detail) => html`<li>${detail}</li>`)}</ul>` : ''}</div>`) : ''}
       </div>
     `;
@@ -1246,13 +1386,14 @@ export class McqApp extends LitElement {
           ${this.bulkImportOpen ? this.renderBulkImport() : ''}
           <div class="filter-row"><label class="search-field"><span>⌕</span><input placeholder="Search questions, subjects, or types…" .value=${this.searchText} @input=${(event) => { this.searchText = event.target.value; this.questionPage = 0; this.requestUpdate(); }} /></label>
             <select aria-label="Filter question type" .value=${this.typeFilter} @change=${(event) => { this.typeFilter = event.target.value; this.questionPage = 0; this.requestUpdate(); }}><option value="">All types</option>${QUESTION_TYPE_OPTIONS.map((opt) => html`<option value=${opt.value}>${opt.shortLabel}</option>`)}</select>
+            <select aria-label="Filter media" .value=${this.mediaFilter} @change=${(event) => { this.mediaFilter = event.target.value; this.questionPage = 0; this.requestUpdate(); }}><option value="">All media</option><option value="pending">Pending media ⚠️</option><option value="with_media">With media</option></select>
             <select aria-label="Filter subject" .value=${this.categoryFilter} @change=${(event) => { this.categoryFilter = event.target.value; this.questionPage = 0; this.requestUpdate(); }}><option value="">All subjects</option>${this.questionCategories.map((value) => html`<option value=${value}>${value}</option>`)}</select>
             <select aria-label="Filter difficulty" .value=${this.difficultyFilter} @change=${(event) => { this.difficultyFilter = event.target.value; this.questionPage = 0; this.requestUpdate(); }}><option value="">All difficulties</option>${this.questionDifficulties.map((value) => html`<option value=${value}>${value}</option>`)}</select>
             <span class="results-count">${this.filteredQuestions.length} results</span></div>
           ${this.filteredQuestions.length ? html`<div class="table-scroll"><table class="data-table question-table"><thead><tr><th>QUESTION</th><th>TYPE</th><th>SUBJECT</th><th>DIFFICULTY</th><th>KEY</th><th>STATUS</th><th></th></tr></thead><tbody>${pageQuestions.map((question) => {
             const typeBadge = formatQuestionTypeBadge(question);
             const keySummary = formatAnswerKeySummary(question);
-            return html`<tr><td><div class="question-cell"><span class="question-row-number">${String(question.id).padStart(2, '0')}</span><span title=${question.question_text}>${question.question_text}</span>${question.media?.type ? html`<span class="media-indicator" title=${`Includes ${question.media.type} media`}>${question.media.type === 'audio' ? '♪' : '🖼'}</span>` : ''}</div></td><td><span class="question-type-pill type-${question.question_type || 'mcq_single'}">${typeBadge.shortLabel}</span></td><td>${question.category || '—'}</td><td>${question.difficulty ? html`<span class="difficulty-tag ${question.difficulty.toLowerCase()}">${question.difficulty}</span>` : '—'}</td><td><span class="answer-key" title=${formatCorrectAnswerSummary(question)}>${keySummary}</span></td><td>${question.locked ? html`<span class="lock-tag" title="Existing exams retain their original question version">⌑ In exam</span>` : html`<span class="available-tag">Available</span>`}</td><td class="row-actions"><button type="button" aria-label="Preview question" title="Preview question" @click=${() => this.openQuestionPreview(question)}>👁</button><button type="button" aria-label="Edit question" title="Edit question" @click=${() => this.openQuestionForm(question)}>✎</button><button type="button" aria-label="Delete question" title="Delete question" @click=${() => this.deleteQuestion(question)}>×</button></td></tr>`;
+            return html`<tr><td><div class="question-cell"><span class="question-row-number">${String(question.id).padStart(2, '0')}</span><span title=${cleanQuestionBlanks(question.question_text)}>${unsafeHTML(renderQuestionText(question.question_text))}</span>${question.media?.placeholder ? html`<span class="media-placeholder-indicator" title="Pending media attachment">⚠️ Pending media</span>` : question.media?.type ? html`<span class="media-indicator" title=${`Includes ${question.media.type} media`}>${question.media.type === 'audio' ? '♪' : '🖼'}</span>` : ''}</div></td><td><span class="question-type-pill type-${question.question_type || 'mcq_single'}">${typeBadge.shortLabel}</span></td><td>${question.category || '—'}</td><td>${question.difficulty ? html`<span class="difficulty-tag ${question.difficulty.toLowerCase()}">${question.difficulty}</span>` : '—'}</td><td><span class="answer-key" title=${formatCorrectAnswerSummary(question)}>${keySummary}</span></td><td>${question.locked ? html`<span class="lock-tag" title="Existing exams retain their original question version">⌑ In exam</span>` : html`<span class="available-tag">Available</span>`}</td><td class="row-actions">${question.media?.placeholder ? html`<button type="button" class="attach-media-btn" aria-label="Attach media" title="Quick attach media file" @click=${() => this.openQuickAttachMedia(question)}>📎</button>` : ''}<button type="button" aria-label="Preview question" title="Preview question" @click=${() => this.openQuestionPreview(question)}>👁</button><button type="button" aria-label="Edit question" title="Edit question" @click=${() => this.openQuestionForm(question)}>✎</button><button type="button" aria-label="Delete question" title="Delete question" @click=${() => this.deleteQuestion(question)}>×</button></td></tr>`;
           })}</tbody></table></div>
             <div class="table-footer"><span>Showing ${this.filteredQuestions.length ? this.questionPage * this.pageSize + 1 : 0}–${Math.min((this.questionPage + 1) * this.pageSize, this.filteredQuestions.length)} of ${this.filteredQuestions.length}</span><div class="pagination"><button ?disabled=${this.questionPage === 0} @click=${() => { this.questionPage -= 1; this.requestUpdate(); }}>←</button><span>${this.questionPage + 1} / ${pageCount}</span><button ?disabled=${this.questionPage >= pageCount - 1} @click=${() => { this.questionPage += 1; this.requestUpdate(); }}>→</button></div></div>` : html`<div class="empty-state"><div class="empty-illustration">⌕</div><h3>No questions found</h3><p>Try changing the filters, import a workbook, or add a question.</p></div>`}
         </section>` : this.adminTab === 'exams' ? this.renderExamsAdmin() : this.renderPasswordSettings()}
@@ -1313,6 +1454,52 @@ export class McqApp extends LitElement {
 
       ${this.renderTypeSpecificEditorSection(draft)}
 
+      <fieldset class="type-fieldset stimulus-fieldset" data-section="stimulus">
+        <legend>Shared stimulus / Reading passage <span class="optional-label">OPTIONAL · PASSAGE OR AUDIO</span></legend>
+        <div class="stimulus-editor-grid">
+          <label>
+            Stimulus title <span class="optional-label">OPTIONAL</span>
+            <input name="stimulus_title" maxlength="200" .value=${draft.stimulus?.title || ''} @input=${(e) => {
+              if (!draft.stimulus) draft.stimulus = { enabled: true };
+              draft.stimulus.title = e.target.value;
+              draft.stimulus.enabled = Boolean(draft.stimulus.title || draft.stimulus.text || draft.stimulus.media_url);
+              this.requestUpdate();
+            }} placeholder="e.g. Reading passage 1" />
+          </label>
+          <label class="full-field">
+            Stimulus text / passage <span class="optional-label">OPTIONAL · SUPPORTS FORMATTING</span>
+            <textarea name="stimulus_text" rows="3" maxlength="4000" .value=${draft.stimulus?.text || ''} @input=${(e) => {
+              if (!draft.stimulus) draft.stimulus = { enabled: true };
+              draft.stimulus.text = e.target.value;
+              draft.stimulus.enabled = Boolean(draft.stimulus.title || draft.stimulus.text || draft.stimulus.media_url);
+              this.requestUpdate();
+            }} placeholder="Enter the reading passage, scenario, or context">${draft.stimulus?.text || ''}</textarea>
+          </label>
+          <div class="type-subgrid two-col">
+            <label>
+              Stimulus media URL <span class="optional-label">OPTIONAL</span>
+              <input name="stimulus_media_url" maxlength="2048" .value=${draft.stimulus?.media_url || ''} @input=${(e) => {
+                if (!draft.stimulus) draft.stimulus = { enabled: true };
+                draft.stimulus.media_url = e.target.value;
+                draft.stimulus.enabled = Boolean(draft.stimulus.title || draft.stimulus.text || draft.stimulus.media_url);
+                this.requestUpdate();
+              }} placeholder="https://... image or audio" />
+            </label>
+            <label>
+              Stimulus media type
+              <select name="stimulus_media_type" .value=${draft.stimulus?.media_type || 'image'} @change=${(e) => {
+                if (!draft.stimulus) draft.stimulus = { enabled: true };
+                draft.stimulus.media_type = e.target.value;
+                this.requestUpdate();
+              }}>
+                <option value="image">Image</option>
+                <option value="audio">Audio clip</option>
+              </select>
+            </label>
+          </div>
+        </div>
+      </fieldset>
+
       <fieldset class="type-fieldset media-fieldset" data-section="media">
         <legend>Question media <span class="optional-label">OPTIONAL · IMAGE OR AUDIO</span></legend>
         <div class="media-editor-grid">
@@ -1337,6 +1524,27 @@ export class McqApp extends LitElement {
             <label class="media-url-field">
               ${draft.media.type === 'audio' ? 'Audio URL' : 'Image URL'}
               <input name="media_url" required maxlength="2048" .value=${draft.media.url} @input=${(event) => { draft.media.url = event.target.value; this.requestUpdate(); }} placeholder="https://example.com/asset.png or /assets/clip.mp3" />
+            </label>
+            <label class="button button-outline upload-button" style="align-self: flex-end; margin-bottom: 0;">
+              ↑ <span>Upload local file</span>
+              <input type="file" accept="image/*,audio/*" style="display:none" @change=${async (e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                const form = new FormData();
+                form.append('file', file);
+                this.busy = true;
+                try {
+                  const res = await api('/api/admin/media/upload', { method: 'POST', body: form });
+                  draft.media.url = res.url;
+                  draft.media.type = res.type;
+                  this.notify('File uploaded successfully.');
+                } catch (err) {
+                  this.notify(err.message, 'error');
+                } finally {
+                  this.busy = false;
+                  this.requestUpdate();
+                }
+              }} />
             </label>
             ${draft.media.type === 'image' ? html`
               <label>
@@ -1494,6 +1702,44 @@ export class McqApp extends LitElement {
       </fieldset>`;
     }
 
+    if (qType === QUESTION_TYPES.FILL_BLANK) {
+      return html`<fieldset class="type-fieldset" data-type-section="fill_blank">
+        <legend>Fill in the blank(s) & accepted answer variants</legend>
+        <div class="type-section-head">
+          <small class="field-help">In the question prompt, use [blank] or [blank1], [blank2] where blanks should appear. List accepted answers for each blank.</small>
+          <button type="button" class="button button-outline button-small" ?disabled=${td.blanks.length >= 10} @click=${() => { addFillBlank(draft); this.requestUpdate(); }}>＋ Add blank</button>
+        </div>
+        <div class="dynamic-item-list">
+          ${td.blanks.map((blank, bIdx) => html`
+            <div class="blank-editor-card">
+              <div class="blank-card-header">
+                <b>Blank #${bIdx + 1} (${blank.id})</b>
+                <input name="blank_label_${bIdx}" aria-label="Blank ${blank.id} label" maxlength="80" .value=${blank.label || `Blank ${bIdx + 1}`} @input=${(e) => { blank.label = e.target.value; this.requestUpdate(); }} placeholder="Label (e.g. Blank 1)" />
+                <button type="button" class="icon-remove-btn" aria-label="Remove blank ${blank.id}" title="Remove blank" ?disabled=${td.blanks.length <= 1} @click=${() => { removeFillBlank(draft, bIdx); this.requestUpdate(); }}>×</button>
+              </div>
+              <div class="blank-variants-list">
+                <small class="field-help">Accepted variants for this blank (exact match):</small>
+                ${blank.variants.map((variant, vIdx) => html`
+                  <div class="dynamic-item-row">
+                    <span class="item-badge">Variant ${vIdx + 1}</span>
+                    <input name="blank_${bIdx}_variant_${vIdx}" aria-label="Variant ${vIdx + 1} for ${blank.id}" required maxlength="120" .value=${variant} @input=${(e) => { blank.variants[vIdx] = e.target.value; this.requestUpdate(); }} placeholder="e.g. H2O" />
+                    <button type="button" class="icon-remove-btn" aria-label="Remove variant ${vIdx + 1}" title="Remove variant" ?disabled=${blank.variants.length <= 1} @click=${() => { removeBlankVariant(draft, bIdx, vIdx); this.requestUpdate(); }}>×</button>
+                  </div>
+                `)}
+                <button type="button" class="button button-outline button-small" ?disabled=${blank.variants.length >= 10} @click=${() => { addBlankVariant(draft, bIdx); this.requestUpdate(); }}>＋ Add accepted variant</button>
+              </div>
+            </div>
+          `)}
+        </div>
+        <div class="type-subgrid two-col">
+          <label class="check-setting inline-check">
+            <input name="case_sensitive" type="checkbox" .checked=${Boolean(td.case_sensitive)} @change=${(e) => { td.case_sensitive = e.target.checked; this.requestUpdate(); }} />
+            <span><b>Case-sensitive matching</b><small>Require exact capitalization for all blanks</small></span>
+          </label>
+        </div>
+      </fieldset>`;
+    }
+
     if (qType === QUESTION_TYPES.SHORT_ANSWER) {
       return html`<fieldset class="type-fieldset" data-type-section="short_answer">
         <legend>Accepted short answers (deterministic match)</legend>
@@ -1646,7 +1892,22 @@ export class McqApp extends LitElement {
         ${model.locked ? html`<span class="lock-tag">⌑ In exam</span>` : ''}
       </div>
 
-      <h4 class="preview-question-title">${model.question_text || (isLiveDraft ? 'Question prompt will appear here…' : '—')}</h4>
+      ${model.stimulus ? html`
+        <div class="preview-stimulus-box">
+          <span class="eyebrow">REFERENCE STIMULUS</span>
+          ${model.stimulus.title ? html`<h5>${model.stimulus.title}</h5>` : ''}
+          ${model.stimulus.text ? html`<p>${unsafeHTML(sanitizeRichText(model.stimulus.text))}</p>` : ''}
+          ${model.stimulus.media?.url ? html`
+            <figure class="question-media-box">
+              ${model.stimulus.media.type === 'audio'
+                ? html`<audio controls preload="metadata" src=${model.stimulus.media.url}></audio>`
+                : html`<img src=${model.stimulus.media.url} alt=${model.stimulus.title || 'Stimulus media'} />`}
+            </figure>
+          ` : ''}
+        </div>
+      ` : ''}
+
+      <h4 class="preview-question-title">${unsafeHTML(renderQuestionText(model.question_text || (isLiveDraft ? 'Question prompt will appear here…' : '—')))}</h4>
 
       ${model.media ? html`
         <figure class="question-media-box">
@@ -1660,7 +1921,7 @@ export class McqApp extends LitElement {
       ${qType === QUESTION_TYPES.MCQ_SINGLE ? html`
         <div class="selection-option-grid preview-options-grid">
           ${(d.options || []).map((opt) => html`<span class=${opt.isCorrect ? 'selection-correct-option' : ''}>
-            <strong>${opt.id}.</strong> ${opt.text || '—'}
+            <strong>${opt.id}.</strong> ${unsafeHTML(sanitizeRichText(opt.text || '—'))}
             ${opt.isCorrect ? html` <b class="correct-answer-label">✓ Correct answer</b>` : ''}
           </span>`)}
         </div>
@@ -1669,7 +1930,7 @@ export class McqApp extends LitElement {
       ${qType === QUESTION_TYPES.MCQ_MULTI ? html`
         <div class="selection-option-grid preview-options-grid">
           ${(d.options || []).map((opt) => html`<span class=${opt.isCorrect ? 'selection-correct-option' : ''}>
-            <strong>[${opt.isCorrect ? '✓' : ' '}] ${opt.id}.</strong> ${opt.text || '—'}
+            <strong>[${opt.isCorrect ? '✓' : ' '}] ${opt.id}.</strong> ${unsafeHTML(sanitizeRichText(opt.text || '—'))}
             ${opt.isCorrect ? html` <b class="correct-answer-label">✓ Correct</b>` : ''}
           </span>`)}
         </div>
@@ -1682,6 +1943,18 @@ export class McqApp extends LitElement {
             <strong>${opt.text}</strong>
             ${opt.isCorrect ? html` <b class="correct-answer-label">✓ Correct answer</b>` : ''}
           </span>`)}
+        </div>
+      ` : ''}
+
+      ${qType === QUESTION_TYPES.FILL_BLANK ? html`
+        <div class="preview-structured-box">
+          <div class="preview-blanks-list">
+            ${(d.blanks || []).map((b) => html`<div class="preview-blank-item">
+              <span><strong>${b.label || b.id}:</strong></span>
+              <span class="accepted-variants">${(b.accepted || []).map((v) => html`<span class="accepted-chip">${v}</span>`)}</span>
+            </div>`)}
+          </div>
+          <small class="preview-rule-note">${d.case_sensitive ? 'Case-sensitive match' : 'Case-insensitive match'} · All blanks must be correct for credit</small>
         </div>
       ` : ''}
 
@@ -1739,7 +2012,17 @@ export class McqApp extends LitElement {
     return html`<form class="bulk-import-panel stack-form" @submit=${this.importPastedQuestions}>
       <div class="bulk-intro"><div><span class="eyebrow muted">BULK QUESTION UPLOAD</span><h3>Paste up to 300 questions</h3><p>Use the same numbered format for every question, with a blank line between questions.</p></div><span class="bulk-count">1–300</span></div>
       <label>Subject<input name="subject" required maxlength="80" list="subject-options" placeholder="e.g. Biology" /></label>
-      <div class="paste-sample"><b>Format sample</b><pre>1. What is the capital of France?\nA. Rome\nB. Paris\nC. Madrid\nD. Berlin\nAnswer: B\nExplanation: Paris is the capital of France.</pre><small>Repeat with 2., 3., and so on. Explanation is optional.</small></div>
+      <div class="paste-sample">
+        <div class="paste-sample-header">
+          <b>Format sample (examples for each question type)</b>
+          <div class="paste-sample-actions">
+            <button type="button" class="button button-small button-outline" @click=${this.copyBulkSample}>Copy sample</button>
+            <button type="button" class="button button-small button-outline" @click=${this.loadBulkSample}>Insert sample</button>
+          </div>
+        </div>
+        <pre>${BULK_PASTE_SAMPLE}</pre>
+        <small>Includes one example for every supported type: Single MCQ, Multi-select, True/False, Fill in blanks, Short answer, Numeric, Ordering, and Matching. Repeat with sequential numbering (1., 2., 3., etc.).</small>
+      </div>
       <label>Questions<textarea name="text" required rows="12" spellcheck="false" placeholder="Paste your numbered questions here…"></textarea></label>
       <div class="editor-actions"><button type="button" class="button button-quiet" @click=${() => { this.bulkImportOpen = false; this.requestUpdate(); }}>Cancel</button><button class="button button-primary" ?disabled=${this.busy}>${this.busy ? 'Uploading…' : 'Upload questions'}</button></div>
     </form>`;
@@ -1850,9 +2133,9 @@ export class McqApp extends LitElement {
           <fieldset class="selection-fieldset"><legend>Question selection</legend>
             <label class="subject-select-label">Filter questions by subject<select .value=${this.examSubject} @change=${(event) => { this.examSubject = event.target.value; this.selectionSearch = ''; this.randomCount = 10; this.requestUpdate(); }}><option value="">All subjects (${this.questions.length})</option>${this.questionCategories.map((value) => html`<option value=${value}>${value} (${this.questions.filter((q) => q.category === value).length})</option>`)}</select></label>
             <div class="selection-switch"><button type="button" class=${this.selectionMode === 'manual' ? 'selected' : ''} @click=${() => { this.selectionMode = 'manual'; this.requestUpdate(); }}>☷ &nbsp; Manual selection</button><button type="button" class=${this.selectionMode === 'random' ? 'selected' : ''} @click=${() => { this.selectionMode = 'random'; this.requestUpdate(); }}>⤨ &nbsp; Random selection</button></div>
-            ${this.selectionMode === 'manual' ? html`<div class="selection-tools"><span>${this.examSubject ? `${availableForSubject.length} questions in ${this.examSubject}` : `${this.questions.length} questions across all subjects`}</span><label class="compact-search"><span>⌕</span><input placeholder="Find a question…" .value=${this.selectionSearch} @input=${(event) => { this.selectionSearch = event.target.value; this.requestUpdate(); }} /></label></div><div class="selection-list">${this.selectionQuestions.map((question) => html`<label class="selection-item"><input type="checkbox" .checked=${this.selectionIds.includes(question.id)} @change=${(event) => this.toggleSelectedQuestion(question.id, event.target.checked)} /><span class="selection-item-content"><div class="selection-item-head"><span class="category-pill">${question.category}</span><span class="question-type-pill type-${question.question_type || 'mcq_single'}">${formatQuestionTypeBadge(question).shortLabel}</span><b>${question.question_text}</b></div>${this.renderQuestionInlineSummary(question)}${question.explanation ? html`<small class="selection-explanation">Explanation: ${question.explanation}</small>` : ''}<small>${question.difficulty || 'Difficulty not set'}</small></span></label>`)}</div>` : html`<div class="random-maker"><label>Number of questions<input type="number" min="1" max=${Math.max(1, availableForSubject.length)} .value=${String(this.randomCount)} ?disabled=${!availableForSubject.length} @input=${(event) => { this.randomCount = event.target.value; this.requestUpdate(); }} /></label><button type="button" class="button button-outline" ?disabled=${!availableForSubject.length} @click=${this.regenerateRandom}>⟳ Regenerate selection</button><div class="random-preview"><span class="preview-icon">✧</span><div><b>${this.selectionIds.length ? `${this.selectionIds.length} questions selected` : 'Preview your random selection'}</b><small>${availableForSubject.length ? `Random picks use ${this.examSubject ? `${this.examSubject} questions.` : 'all available questions.'}` : 'No questions found.'}</small></div></div></div>`}
+            ${this.selectionMode === 'manual' ? html`<div class="selection-tools"><span>${this.examSubject ? `${availableForSubject.length} questions in ${this.examSubject}` : `${this.questions.length} questions across all subjects`}</span><label class="compact-search"><span>⌕</span><input placeholder="Find a question…" .value=${this.selectionSearch} @input=${(event) => { this.selectionSearch = event.target.value; this.requestUpdate(); }} /></label></div><div class="selection-list">${this.selectionQuestions.map((question) => html`<label class="selection-item"><input type="checkbox" .checked=${this.selectionIds.includes(question.id)} @change=${(event) => this.toggleSelectedQuestion(question.id, event.target.checked)} /><span class="selection-item-content"><div class="selection-item-head"><span class="category-pill">${question.category}</span><span class="question-type-pill type-${question.question_type || 'mcq_single'}">${formatQuestionTypeBadge(question).shortLabel}</span><b>${unsafeHTML(renderQuestionText(question.question_text))}</b></div>${this.renderQuestionInlineSummary(question)}${question.explanation ? html`<small class="selection-explanation">Explanation: ${question.explanation}</small>` : ''}<small>${question.difficulty || 'Difficulty not set'}</small></span></label>`)}</div>` : html`<div class="random-maker"><label>Number of questions<input type="number" min="1" max=${Math.max(1, availableForSubject.length)} .value=${String(this.randomCount)} ?disabled=${!availableForSubject.length} @input=${(event) => { this.randomCount = event.target.value; this.requestUpdate(); }} /></label><button type="button" class="button button-outline" ?disabled=${!availableForSubject.length} @click=${this.regenerateRandom}>⟳ Regenerate selection</button><div class="random-preview"><span class="preview-icon">✧</span><div><b>${this.selectionIds.length ? `${this.selectionIds.length} questions selected` : 'Preview your random selection'}</b><small>${availableForSubject.length ? `Random picks use ${this.examSubject ? `${this.examSubject} questions.` : 'all available questions.'}` : 'No questions found.'}</small></div></div></div>`}
           <div class="selection-footer"><span><b>${this.selectionIds.length}</b> question${this.selectionIds.length === 1 ? '' : 's'} selected${selectedCategories.length > 1 ? ` across ${selectedCategories.length} subjects` : selectedCategories.length === 1 ? ` (${selectedCategories[0]})` : ''}</span><span>1 mark each · −${Number(this.querySelector?.('[name="negative_mark"]')?.value || 1)} for a wrong answer</span></div>
-            ${selectedQuestions.length ? html`<div class="selected-questions-preview" aria-label="Full selected question preview">${selectedQuestions.map((q, index) => html`<article class="selected-question-preview"><div class="selected-preview-heading"><span>${String(index + 1).padStart(2, '0')}</span><span class="category-pill">${q.category}</span><span class="question-type-pill type-${q.question_type || 'mcq_single'}">${formatQuestionTypeBadge(q).shortLabel}</span><b>${q.question_text}</b><button type="button" class="remove-selection-btn" title="Remove question" aria-label="Remove question ${index + 1}" @click=${() => this.toggleSelectedQuestion(q.id, false)}>×</button></div>${this.renderQuestionInlineSummary(q)}${q.explanation ? html`<small class="selection-explanation">Explanation: ${q.explanation}</small>` : ''}</article>`)}</div>` : ''}
+            ${selectedQuestions.length ? html`<div class="selected-questions-preview" aria-label="Full selected question preview">${selectedQuestions.map((q, index) => html`<article class="selected-question-preview"><div class="selected-preview-heading"><span>${String(index + 1).padStart(2, '0')}</span><span class="category-pill">${q.category}</span><span class="question-type-pill type-${q.question_type || 'mcq_single'}">${formatQuestionTypeBadge(q).shortLabel}</span><b>${unsafeHTML(renderQuestionText(q.question_text))}</b><button type="button" class="remove-selection-btn" title="Remove question" aria-label="Remove question ${index + 1}" @click=${() => this.toggleSelectedQuestion(q.id, false)}>×</button></div>${this.renderQuestionInlineSummary(q)}${q.explanation ? html`<small class="selection-explanation">Explanation: ${q.explanation}</small>` : ''}</article>`)}</div>` : ''}
           </fieldset>
           <div class="field-row"><label>Wrong answer penalty<select name="negative_mark" required><option value="0">0 marks (No penalty)</option><option value="1">−1 mark</option><option value="0.25">−0.25 mark</option><option value="0.5">−0.50 mark</option></select><small class="field-help">Unanswered questions receive no penalty.</small></label><label>Initial status<select name="status"><option value="published">Published</option><option value="draft">Draft</option></select></label></div>
           <div class="settings-row"><div class="result-settings"><span class="setting-title">Student results</span><label class="check-setting"><input name="show_score" type="checkbox" @change=${(event) => { const answerBox = this.querySelector?.('[name="show_answers"]'); if (answerBox) { answerBox.disabled = !event.target.checked; if (!event.target.checked) answerBox.checked = false; } }} /><span><b>Show final score</b><small>Students can see their total mark.</small></span></label><label class="check-setting"><input name="show_answers" type="checkbox" disabled /><span><b>Show answer review</b><small>Students can review correct answers and explanations.</small></span></label><label class="check-setting"><input name="allow_pdf_download" type="checkbox" /><span><b>Allow PDF download</b><small>Students can download their result report and answer sheet with explanations as PDF.</small></span></label></div></div>
@@ -1901,7 +2184,7 @@ export class McqApp extends LitElement {
       <div class="sheet-questions">${sheet.answers.map((answer, index) => {
         const qType = answer.question_type || DEFAULT_QUESTION_TYPE;
         const answered = isAnswerProvided(answer, answer.selected_option, answer.answer_data);
-        return html`<article class="sheet-question ${graded ? answer.is_correct ? 'is-correct' : 'is-wrong' : 'is-pending'}"><div class="sheet-q-head"><span>QUESTION ${String(index + 1).padStart(2, '0')} · ${formatQuestionTypeBadge(answer).shortLabel.toUpperCase()}</span><span class=${graded ? answer.is_correct ? 'correct-text' : 'wrong-text' : 'pending-text'}>${graded ? answer.is_correct ? '✓ Correct' : answered ? '× Incorrect' : 'Not answered' : 'Not graded'}</span></div><h4>${answer.question_text}</h4>
+        return html`<article class="sheet-question ${graded ? answer.is_correct ? 'is-correct' : 'is-wrong' : 'is-pending'}"><div class="sheet-q-head"><span>QUESTION ${String(index + 1).padStart(2, '0')} · ${formatQuestionTypeBadge(answer).shortLabel.toUpperCase()}</span><span class=${graded ? answer.is_correct ? 'correct-text' : 'wrong-text' : 'pending-text'}>${graded ? answer.is_correct ? '✓ Correct' : answered ? '× Incorrect' : 'Not answered' : 'Not graded'}</span></div><h4>${unsafeHTML(renderQuestionText(answer.question_text))}</h4>
           ${qType === QUESTION_TYPES.MCQ_SINGLE
             ? html`<div class="sheet-answers">${letters.map((letter) => html`<div class="sheet-option ${letter === answer.correct_option ? 'right-option' : ''} ${graded && letter === answer.selected_option && !answer.is_correct ? 'chosen-wrong' : ''}"><span>${letter}</span><span>${answer[optionKeys[letter]]}</span>${letter === answer.selected_option ? html`<small class="student-label">STUDENT</small>` : ''}${letter === answer.correct_option ? html`<small>CORRECT</small>` : ''}</div>`)}</div>`
             : html`<div class="sheet-non-mcq-review"><p><b>Student response:</b> ${formatStudentAnswerSummary(answer)}</p><p><b>Correct answer:</b> ${formatCorrectAnswerSummary(answer)}</p></div>`}
@@ -1974,7 +2257,7 @@ export class McqApp extends LitElement {
         <div class="answer-options">
           ${letters.map((letter) => html`<button class="answer-option ${this.answers[question.id] === letter ? 'selected' : ''}" @click=${() => this.selectAnswer(question, letter)}>
             <span class="option-letter">${letter}</span>
-            <span class="option-text">${question[optionKeys[letter]] || (qConfig.options || []).find((o) => o.id === letter)?.text || ''}</span>
+            <span class="option-text">${unsafeHTML(sanitizeRichText(question[optionKeys[letter]] || (qConfig.options || []).find((o) => o.id === letter)?.text || ''))}</span>
             <span class="option-radio">${this.answers[question.id] === letter ? html`<i></i>` : ''}</span>
           </button>`)}
         </div>
@@ -1998,7 +2281,7 @@ export class McqApp extends LitElement {
               this.saveStructuredAnswer(question, nextOptions.length ? { selected_options: nextOptions } : null);
             }}>
               <span class="option-letter">${opt.id}</span>
-              <span class="option-text">${opt.text}</span>
+              <span class="option-text">${unsafeHTML(sanitizeRichText(opt.text))}</span>
               <span class="option-radio">${isSelected ? html`<i></i>` : ''}</span>
             </button>`;
           })}
@@ -2021,9 +2304,34 @@ export class McqApp extends LitElement {
               this.saveStructuredAnswer(question, { selected_answer: boolVal });
             }}>
               <span class="option-letter">${boolVal ? 'T' : 'F'}</span>
-              <span class="option-text">${opt.text}</span>
+              <span class="option-text">${unsafeHTML(sanitizeRichText(opt.text))}</span>
               <span class="option-radio">${isSelected ? html`<i></i>` : ''}</span>
             </button>`;
+          })}
+        </div>
+      `;
+    }
+
+    if (qType === QUESTION_TYPES.FILL_BLANK) {
+      const blanks = Array.isArray(qConfig.blanks) && qConfig.blanks.length > 0
+        ? qConfig.blanks
+        : [{ id: 'B1', label: 'Blank 1' }];
+      const currentBlanks = currentData.blanks && typeof currentData.blanks === 'object' ? currentData.blanks : {};
+      return html`
+        <p class="question-hint">Fill in the blank(s) below${qConfig.case_sensitive ? ' (case-sensitive)' : ''}</p>
+        <div class="student-blank-list">
+          ${blanks.map((b, idx) => {
+            const val = currentBlanks[b.id] ?? currentBlanks[b.id.toLowerCase()] ?? '';
+            return html`<div class="student-blank-row">
+              <span class="option-letter">${b.id}</span>
+              <label class="student-blank-label">
+                <span>${b.label || `Blank ${idx + 1}`}</span>
+                <input type="text" class="student-blank-input" aria-label=${b.label || `Blank ${idx + 1}`} maxlength=${b.max_length || 100} placeholder="Type your answer…" .value=${val} @input=${(e) => {
+                  const nextBlanks = { ...currentBlanks, [b.id]: e.target.value };
+                  this.saveStructuredAnswer(question, { blanks: nextBlanks });
+                }} />
+              </label>
+            </div>`;
           })}
         </div>
       `;
@@ -2064,7 +2372,7 @@ export class McqApp extends LitElement {
         <p class="question-hint">Match each prompt with the corresponding choice</p>
         <div class="student-matching-list">
           ${prompts.map((p) => html`<div class="student-matching-row">
-            <span class="prompt-label"><strong>${p.id}.</strong> ${p.text}</span>
+            <span class="prompt-label"><strong>${p.id}.</strong> ${unsafeHTML(sanitizeRichText(p.text))}</span>
             <select aria-label="Match for ${p.text}" .value=${currentPairs[p.id] || ''} @change=${(event) => {
               const nextPairs = { ...currentPairs, [p.id]: event.target.value };
               this.saveStructuredAnswer(question, { pairs: nextPairs });
@@ -2080,17 +2388,44 @@ export class McqApp extends LitElement {
     if (qType === QUESTION_TYPES.ORDERING) {
       const items = Array.isArray(qConfig.items) ? qConfig.items : [];
       const itemMap = new Map(items.map((i) => [i.id, i]));
+      if (!this.orderingInitialState) this.orderingInitialState = {};
+      if (!this.orderingInitialState[question.id]) {
+        const rawIds = items.map((i) => i.id);
+        this.orderingInitialState[question.id] = rawIds.length >= 2 ? [...rawIds].reverse() : rawIds;
+      }
       const currentOrder = Array.isArray(currentData.order) && currentData.order.length === items.length
         ? currentData.order
-        : items.map((i) => i.id);
+        : this.orderingInitialState[question.id];
+
       return html`
-        <p class="question-hint">Arrange the items into the correct order</p>
-        <div class="student-ordering-list">
+        <p class="question-hint">Drag and drop or use the arrows to arrange the items into the correct order</p>
+        <div class="student-ordering-list" role="list">
           ${currentOrder.map((id, idx) => {
             const item = itemMap.get(id) || { id, text: '' };
-            return html`<div class="student-ordering-row">
+            return html`<div class="student-ordering-row"
+              role="listitem"
+              draggable="true"
+              @dragstart=${(e) => {
+                e.dataTransfer.setData('text/plain', String(idx));
+                e.dataTransfer.effectAllowed = 'move';
+              }}
+              @dragover=${(e) => {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'move';
+              }}
+              @drop=${(e) => {
+                e.preventDefault();
+                const fromIdx = Number(e.dataTransfer.getData('text/plain'));
+                if (Number.isInteger(fromIdx) && fromIdx !== idx && fromIdx >= 0 && fromIdx < currentOrder.length) {
+                  const nextOrder = [...currentOrder];
+                  const [moved] = nextOrder.splice(fromIdx, 1);
+                  nextOrder.splice(idx, 0, moved);
+                  this.saveStructuredAnswer(question, { order: nextOrder });
+                }
+              }}>
+              <span class="drag-handle" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
               <span class="option-letter">${idx + 1}</span>
-              <span class="option-text">${item.text}</span>
+              <span class="option-text">${unsafeHTML(sanitizeRichText(item.text))}</span>
               <div class="order-move-controls">
                 <button type="button" class="icon-move-btn" aria-label="Move ${item.text} up" ?disabled=${idx === 0} @click=${() => {
                   const nextOrder = [...currentOrder];
@@ -2123,7 +2458,22 @@ export class McqApp extends LitElement {
     return html`<main class="exam-player">
       <div class="exam-player-top"><button class="brand" @click=${async () => { if (await this.confirmMessage('Leave this exam? You can return using this browser session.', { label: 'Leave exam' })) { this.page = 'home'; this.requestUpdate(); } }}><span class="brand-mark">${title.charAt(0).toUpperCase()}</span><span>${title.toLowerCase()}<span class="brand-dot">.</span><small>${subtitle.toUpperCase()}</small></span></button><div class="exam-live-meta"><span class="live-label"><span></span> IN PROGRESS</span><span class="timer-chip ${this.remainingSeconds < 300 ? 'timer-warning' : ''}"><span>◷</span>${htmlTime(this.remainingSeconds)}</span></div></div>
       <div class="exam-player-layout"><aside class="exam-sidebar"><div class="sidebar-exam-info"><span class="eyebrow muted">EXAMINATION</span><h2>${this.attempt.exam_title}</h2><p>${this.attempt.student_name}<span> · Roll ${this.attempt.roll_number}</span></p></div><div class="sidebar-progress"><div><span>YOUR PROGRESS</span><b>${answered} <small>/ ${total}</small></b></div><div class="progress-track"><span style="width:${progress}%"></span></div><p>${answered === total ? 'You have answered every question.' : `${total - answered} questions remaining`}</p></div><div class="question-nav-label"><span>QUESTION NAVIGATOR</span><span>${answered} answered</span></div><div class="question-nav">${this.attempt.questions.map((item, index) => html`<button class="question-nav-item ${index === this.currentQuestion ? 'current' : ''} ${this.answers[item.id] ? 'answered' : ''}" @click=${() => { this.goToQuestion(index); }} aria-label=${`Question ${index + 1}${this.answers[item.id] ? ', answered' : ''}`}><span>${String(index + 1).padStart(2, '0')}</span>${this.answers[item.id] ? html`<span class="nav-check">✓</span>` : ''}</button>`)}</div><div class="nav-legend"><span><i class="legend-current"></i>Current</span><span><i class="legend-done"></i>Answered</span><span><i class="legend-empty"></i>Unanswered</span></div><div class="autosave-note"><span>✓</span> Answers save as you go</div></aside>
-        <section class="question-stage"><div class="question-stage-top"><span>QUESTION <b>${String(this.currentQuestion + 1).padStart(2, '0')}</b> <i>OF</i> ${String(total).padStart(2, '0')}</span><span class="mark-chip">${question.marks} MARK</span></div><div class="question-progress"><span style="width:${((this.currentQuestion + 1) / total) * 100}%"></span></div><div class="question-content"><div class="question-step">${String(this.currentQuestion + 1).padStart(2, '0')} <span>—</span> ${String(total).padStart(2, '0')}</div><h1>${question.question_text}</h1>
+        <section class="question-stage"><div class="question-stage-top"><span>QUESTION <b>${String(this.currentQuestion + 1).padStart(2, '0')}</b> <i>OF</i> ${String(total).padStart(2, '0')}</span><span class="mark-chip">${question.marks} MARK</span></div><div class="question-progress"><span style="width:${((this.currentQuestion + 1) / total) * 100}%"></span></div><div class="question-content">
+          ${question.stimulus ? html`
+            <div class="stimulus-panel">
+              <span class="eyebrow stimulus-eyebrow">READING / REFERENCE STIMULUS</span>
+              ${question.stimulus.title ? html`<h3 class="stimulus-title">${question.stimulus.title}</h3>` : ''}
+              ${question.stimulus.text ? html`<div class="stimulus-text">${unsafeHTML(sanitizeRichText(question.stimulus.text))}</div>` : ''}
+              ${question.stimulus.media?.url ? html`
+                <figure class="question-media-box stimulus-media">
+                  ${question.stimulus.media.type === 'audio'
+                    ? html`<audio controls preload="metadata" src=${question.stimulus.media.url}></audio>`
+                    : html`<img src=${question.stimulus.media.url} alt=${question.stimulus.title || 'Stimulus media'} />`}
+                </figure>
+              ` : ''}
+            </div>
+          ` : ''}
+          <div class="question-step">${String(this.currentQuestion + 1).padStart(2, '0')} <span>—</span> ${String(total).padStart(2, '0')}</div><h1>${unsafeHTML(renderQuestionText(question.question_text))}</h1>
           ${question.media?.url ? html`<figure class="question-media-box">${question.media.type === 'audio' ? html`<audio controls preload="metadata" src=${question.media.url}></audio>` : html`<img src=${question.media.url} alt=${question.media.alt || question.question_text} />`}${question.media.caption ? html`<figcaption>${question.media.caption}</figcaption>` : ''}</figure>` : ''}
           ${this.renderStudentQuestionInput(question)}
         </div><div class="question-actions"><button class="button button-outline" ?disabled=${this.currentQuestion === 0} @click=${() => { this.goToQuestion(this.currentQuestion - 1); }}>← <span>Previous</span></button><span class="save-state"><span class="save-dot"></span> ${this.pendingAnswerSaves ? 'Saving…' : 'Saved automatically'}</span>${this.currentQuestion < total - 1 ? html`<button class="button button-primary" @click=${() => { this.goToQuestion(this.currentQuestion + 1); }}>Next question <span>→</span></button>` : html`<button class="button button-primary" @click=${() => this.submitAttempt(false)} ?disabled=${this.busy}>Submit exam <span>→</span></button>`}</div><button class="submit-text" @click=${() => this.submitAttempt(false)}>Submit examination</button></section>
@@ -2138,7 +2488,7 @@ export class McqApp extends LitElement {
       ${Object.hasOwn(result, 'score') ? html`<div class="student-score"><span>YOUR SCORE</span><strong>${result.score}<small> / ${this.attempt.questions.length}</small></strong><p>${result.status === 'auto_submitted' ? 'Submitted automatically when time expired' : 'Your examination has been submitted'}</p></div>` : ''}
       ${reviewed.length ? html`<div class="student-review"><div class="review-heading"><h2>Answer review</h2><span>${reviewed.filter((answer) => answer.is_correct).length} of ${reviewed.length} correct</span></div>${reviewed.map((answer, index) => {
         const answered = isAnswerProvided(answer, answer.selected_option, answer.answer_data);
-        return html`<article class="review-item ${answer.is_correct ? 'is-correct' : 'is-wrong'}"><div class="review-item-head"><span>QUESTION ${String(index + 1).padStart(2, '0')}</span><b>${answer.is_correct ? '✓ Correct' : answered ? '× Incorrect' : 'Not answered'}</b></div><h3>${answer.question_text}</h3><p>Your answer: <strong>${formatStudentAnswerSummary(answer)}</strong></p><p>Correct answer: <strong>${formatCorrectAnswerSummary(answer)}</strong></p>${answer.explanation ? html`<p class="answer-explanation"><b>Explanation</b> ${answer.explanation}</p>` : ''}<span class="review-mark">${answer.marks_awarded ?? 0} / ${answer.marks} mark</span></article>`;
+        return html`<article class="review-item ${answer.is_correct ? 'is-correct' : 'is-wrong'}"><div class="review-item-head"><span>QUESTION ${String(index + 1).padStart(2, '0')}</span><b>${answer.is_correct ? '✓ Correct' : answered ? '× Incorrect' : 'Not answered'}</b></div><h3>${unsafeHTML(renderQuestionText(answer.question_text))}</h3><p>Your answer: <strong>${formatStudentAnswerSummary(answer)}</strong></p><p>Correct answer: <strong>${formatCorrectAnswerSummary(answer)}</strong></p>${answer.explanation ? html`<p class="answer-explanation"><b>Explanation</b> ${unsafeHTML(sanitizeRichText(answer.explanation))}</p>` : ''}<span class="review-mark">${answer.marks_awarded ?? 0} / ${answer.marks} mark</span></article>`;
       })}</div>` : ''}
       ${(result.allow_pdf_download || this.attempt?.allow_pdf_download) && reviewed.length ? html`<div class="result-download-section"><button class="button button-outline button-full download-pdf-btn" @click=${() => this.downloadResultPdf()}>↓ Download result as PDF</button></div>` : ''}
       <button class="button button-primary button-full" @click=${this.newAttempt}>Return to examinations <span>→</span></button>

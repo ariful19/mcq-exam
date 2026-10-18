@@ -11,6 +11,12 @@ import {
   hydrateAnswerRow,
   validateStudentAnswer,
   evaluateQuestionAnswer,
+  sanitizeRichText,
+  validateQuestionStimulus,
+  formatQuestionBlanks,
+  cleanQuestionBlanks,
+  renderQuestionText,
+  BULK_PASTE_SAMPLE,
 } from '../../server/question-types.js';
 
 export {
@@ -22,10 +28,16 @@ export {
   QUESTION_TYPE_META,
   normalizeQuestion,
   validateQuestionMedia,
+  validateQuestionStimulus,
+  sanitizeRichText,
+  formatQuestionBlanks,
+  cleanQuestionBlanks,
+  renderQuestionText,
   hydrateQuestionRow,
   hydrateAnswerRow,
   validateStudentAnswer,
   evaluateQuestionAnswer,
+  BULK_PASTE_SAMPLE,
 };
 
 export const MULTI_OPTION_LETTERS = Object.freeze(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']);
@@ -77,6 +89,19 @@ const RELEVANT_INPUTS_BY_TYPE = Object.freeze({
       'correct_answer',
       'true_text',
       'false_text',
+      'category',
+      'difficulty',
+      'media_type',
+      'explanation',
+    ]),
+  }),
+  [QUESTION_TYPES.FILL_BLANK]: Object.freeze({
+    sections: Object.freeze(['common', 'fill_blank', 'media', 'explanation']),
+    inputs: Object.freeze([
+      'question_type',
+      'question_text',
+      'fill_blank_blanks',
+      'case_sensitive',
       'category',
       'difficulty',
       'media_type',
@@ -181,6 +206,13 @@ export function createDefaultTypeSlice(type) {
         false_text: 'False',
         correct_answer: true,
       };
+    case QUESTION_TYPES.FILL_BLANK:
+      return {
+        blanks: [
+          { id: 'B1', label: 'Blank 1', variants: [''] },
+        ],
+        case_sensitive: false,
+      };
     case QUESTION_TYPES.SHORT_ANSWER:
       return {
         accepted_answers: [''],
@@ -227,6 +259,7 @@ export function createEmptyTypeData() {
     [QUESTION_TYPES.MCQ_SINGLE]: createDefaultTypeSlice(QUESTION_TYPES.MCQ_SINGLE),
     [QUESTION_TYPES.MCQ_MULTI]: createDefaultTypeSlice(QUESTION_TYPES.MCQ_MULTI),
     [QUESTION_TYPES.TRUE_FALSE]: createDefaultTypeSlice(QUESTION_TYPES.TRUE_FALSE),
+    [QUESTION_TYPES.FILL_BLANK]: createDefaultTypeSlice(QUESTION_TYPES.FILL_BLANK),
     [QUESTION_TYPES.SHORT_ANSWER]: createDefaultTypeSlice(QUESTION_TYPES.SHORT_ANSWER),
     [QUESTION_TYPES.NUMERIC]: createDefaultTypeSlice(QUESTION_TYPES.NUMERIC),
     [QUESTION_TYPES.MATCHING]: createDefaultTypeSlice(QUESTION_TYPES.MATCHING),
@@ -344,10 +377,30 @@ export function createQuestionDraft(question = null) {
         items,
         correct_order: finalOrder,
       };
+    } else if (questionType === QUESTION_TYPES.FILL_BLANK) {
+      const rawBlanks = Array.isArray(qConfig.blanks) && qConfig.blanks.length > 0
+        ? qConfig.blanks
+        : [{ id: 'B1', label: 'Blank 1' }];
+      const aKeyBlanks = aKey.blanks && typeof aKey.blanks === 'object' ? aKey.blanks : {};
+      const blanks = rawBlanks.map((b, idx) => {
+        const id = String(b.id || `B${idx + 1}`).toUpperCase();
+        const vars = aKeyBlanks[id] ?? aKeyBlanks[id.toLowerCase()] ?? [''];
+        const variants = (Array.isArray(vars) ? vars : [vars]).map((v) => String(v ?? ''));
+        return {
+          id,
+          label: String(b.label || `Blank ${idx + 1}`),
+          variants: variants.length ? variants : [''],
+        };
+      });
+      typeData[QUESTION_TYPES.FILL_BLANK] = {
+        blanks,
+        case_sensitive: Boolean(qConfig.case_sensitive ?? aKey.case_sensitive ?? false),
+      };
     }
   }
 
   const mediaObj = hydrated?.media && typeof hydrated.media === 'object' ? hydrated.media : null;
+  const stimObj = hydrated?.stimulus && typeof hydrated.stimulus === 'object' ? hydrated.stimulus : (hydrated?.question_config?.stimulus || null);
 
   return {
     id: hydrated?.id ?? null,
@@ -358,11 +411,19 @@ export function createQuestionDraft(question = null) {
     difficulty: String(hydrated?.difficulty ?? ''),
     explanation: String(hydrated?.explanation ?? ''),
     media: {
-      enabled: Boolean(mediaObj?.type && mediaObj?.url),
+      enabled: Boolean(mediaObj?.type && (mediaObj?.url || mediaObj?.placeholder)),
+      placeholder: Boolean(mediaObj?.placeholder),
       type: ALLOWED_MEDIA_TYPES.includes(mediaObj?.type) ? mediaObj.type : 'image',
       url: String(mediaObj?.url ?? ''),
       alt: String(mediaObj?.alt ?? ''),
       caption: String(mediaObj?.caption ?? ''),
+    },
+    stimulus: {
+      enabled: Boolean(stimObj && (stimObj.title || stimObj.text || stimObj.media)),
+      title: String(stimObj?.title ?? ''),
+      text: String(stimObj?.text ?? ''),
+      media_url: String(stimObj?.media?.url ?? ''),
+      media_type: stimObj?.media?.type === 'audio' ? 'audio' : 'image',
     },
     typeData,
     pendingTypeSwitch: null,
@@ -392,6 +453,8 @@ export function hasPopulatedTypeData(draft, type = draft?.question_type) {
         (td.true_text?.trim() && td.true_text.trim() !== 'True') ||
         (td.false_text?.trim() && td.false_text.trim() !== 'False')
       );
+    case QUESTION_TYPES.FILL_BLANK:
+      return Boolean((td.blanks || []).some((b) => (b.variants || []).some((v) => v?.trim())));
     case QUESTION_TYPES.SHORT_ANSWER:
       return Boolean(
         (td.accepted_answers || []).some((a) => String(a ?? '').trim()) ||
@@ -489,6 +552,10 @@ export function getIncompatibleFieldsOnTypeSwitch(draft, fromType, toType) {
   } else if (fromType === QUESTION_TYPES.ORDERING) {
     if ((td.items || []).some((i) => i.text?.trim())) {
       incompatible.push('Ordering sequence items and order key');
+    }
+  } else if (fromType === QUESTION_TYPES.FILL_BLANK) {
+    if ((td.blanks || []).some((b) => (b.variants || []).some((v) => v?.trim()))) {
+      incompatible.push('Fill-in-the-blank blanks and accepted variants');
     }
   }
 
@@ -797,6 +864,39 @@ export function moveOrderingItem(draft, index, direction) {
   return draft;
 }
 
+export function addFillBlank(draft) {
+  const td = draft?.typeData?.[QUESTION_TYPES.FILL_BLANK];
+  if (!td || td.blanks.length >= 10) return draft;
+  const nextIdx = td.blanks.length + 1;
+  td.blanks = [...td.blanks, { id: `B${nextIdx}`, label: `Blank ${nextIdx}`, variants: [''] }];
+  return draft;
+}
+
+export function removeFillBlank(draft, index) {
+  const td = draft?.typeData?.[QUESTION_TYPES.FILL_BLANK];
+  if (!td || td.blanks.length <= 1) return draft;
+  td.blanks = td.blanks.filter((_, idx) => idx !== index).map((b, idx) => ({
+    id: `B${idx + 1}`,
+    label: `Blank ${idx + 1}`,
+    variants: b.variants,
+  }));
+  return draft;
+}
+
+export function addBlankVariant(draft, blankIndex) {
+  const td = draft?.typeData?.[QUESTION_TYPES.FILL_BLANK];
+  if (!td || !td.blanks[blankIndex] || td.blanks[blankIndex].variants.length >= 10) return draft;
+  td.blanks[blankIndex].variants = [...td.blanks[blankIndex].variants, ''];
+  return draft;
+}
+
+export function removeBlankVariant(draft, blankIndex, variantIndex) {
+  const td = draft?.typeData?.[QUESTION_TYPES.FILL_BLANK];
+  if (!td || !td.blanks[blankIndex] || td.blanks[blankIndex].variants.length <= 1) return draft;
+  td.blanks[blankIndex].variants = td.blanks[blankIndex].variants.filter((_, idx) => idx !== variantIndex);
+  return draft;
+}
+
 export function buildQuestionPayloadFromDraft(draft) {
   if (!draft) return {};
   const qType = draft.question_type || DEFAULT_QUESTION_TYPE;
@@ -804,11 +904,27 @@ export function buildQuestionPayloadFromDraft(draft) {
 
   let media = null;
   if (draft.media?.enabled) {
-    media = {
-      type: String(draft.media.type || 'image').trim().toLowerCase(),
-      url: String(draft.media.url ?? '').trim(),
-      ...(String(draft.media.alt ?? '').trim() ? { alt: String(draft.media.alt).trim() } : {}),
-      ...(String(draft.media.caption ?? '').trim() ? { caption: String(draft.media.caption).trim() } : {}),
+    if (draft.media.placeholder) {
+      media = {
+        type: String(draft.media.type || 'image').trim().toLowerCase(),
+        placeholder: true,
+      };
+    } else {
+      media = {
+        type: String(draft.media.type || 'image').trim().toLowerCase(),
+        url: String(draft.media.url ?? '').trim(),
+        ...(String(draft.media.alt ?? '').trim() ? { alt: String(draft.media.alt).trim() } : {}),
+        ...(String(draft.media.caption ?? '').trim() ? { caption: String(draft.media.caption).trim() } : {}),
+      };
+    }
+  }
+
+  let stimulus = null;
+  if (draft.stimulus?.enabled) {
+    stimulus = {
+      ...(draft.stimulus.title ? { title: String(draft.stimulus.title).trim() } : {}),
+      ...(draft.stimulus.text ? { text: String(draft.stimulus.text).trim() } : {}),
+      ...(draft.stimulus.media_url ? { media: { type: draft.stimulus.media_type || 'image', url: draft.stimulus.media_url } } : {}),
     };
   }
 
@@ -819,6 +935,7 @@ export function buildQuestionPayloadFromDraft(draft) {
     difficulty: String(draft.difficulty ?? '').trim(),
     explanation: String(draft.explanation ?? '').trim(),
     media,
+    stimulus,
   };
 
   if (qType === QUESTION_TYPES.MCQ_SINGLE) {
@@ -960,6 +1077,33 @@ export function buildQuestionPayloadFromDraft(draft) {
     };
   }
 
+  if (qType === QUESTION_TYPES.FILL_BLANK) {
+    const rawBlanks = Array.isArray(td.blanks) ? td.blanks : [];
+    const blanksConfig = [];
+    const blanksKey = {};
+    rawBlanks.forEach((b, idx) => {
+      const id = String(b.id || `B${idx + 1}`).trim().toUpperCase();
+      const label = String(b.label || `Blank ${idx + 1}`).trim();
+      const variants = (Array.isArray(b.variants) ? b.variants : [b.variants])
+        .map((v) => String(v ?? '').trim())
+        .filter(Boolean);
+      blanksConfig.push({ id, label });
+      blanksKey[id] = variants.length ? variants : [''];
+    });
+    const caseSensitive = Boolean(td.case_sensitive);
+    return {
+      ...base,
+      question_config: {
+        blanks: blanksConfig,
+        case_sensitive: caseSensitive,
+      },
+      answer_key: {
+        blanks: blanksKey,
+        case_sensitive: caseSensitive,
+      },
+    };
+  }
+
   return base;
 }
 
@@ -1003,6 +1147,12 @@ export function formatAnswerKeySummary(questionRow) {
     }
     return '—';
   }
+  if (qType === QUESTION_TYPES.FILL_BLANK) {
+    const blanks = aKey.blanks && typeof aKey.blanks === 'object' ? aKey.blanks : {};
+    const entries = Object.entries(blanks);
+    if (!entries.length) return '—';
+    return entries.map(([id, vars]) => `${id}: ${(Array.isArray(vars) ? vars : [vars]).join(' / ')}`).join('; ');
+  }
   if (qType === QUESTION_TYPES.SHORT_ANSWER) {
     const accepted = Array.isArray(aKey.accepted_answers) ? aKey.accepted_answers : [];
     if (!accepted.length) return '—';
@@ -1044,6 +1194,7 @@ export function buildQuestionPreviewModel(questionOrDraft) {
   const qConfig = source.question_config || {};
   const aKey = source.answer_key || {};
   const media = source.media && typeof source.media === 'object' && source.media.url ? source.media : null;
+  const stimulus = source.stimulus || source.question_config?.stimulus || null;
 
   let details = {};
   if (qType === QUESTION_TYPES.MCQ_SINGLE) {
@@ -1091,6 +1242,21 @@ export function buildQuestionPreviewModel(questionOrDraft) {
         isCorrect: (opt.id === 'true' && correctBool) || (opt.id === 'false' && !correctBool),
       })),
       correct_answer: correctBool,
+    };
+  } else if (qType === QUESTION_TYPES.FILL_BLANK) {
+    const rawBlanks = Array.isArray(qConfig.blanks) ? qConfig.blanks : [];
+    const aKeyBlanks = aKey.blanks && typeof aKey.blanks === 'object' ? aKey.blanks : {};
+    details = {
+      blanks: rawBlanks.map((b, idx) => {
+        const id = String(b.id || `B${idx + 1}`).toUpperCase();
+        const vars = aKeyBlanks[id] ?? aKeyBlanks[id.toLowerCase()] ?? [];
+        return {
+          id,
+          label: b.label || `Blank ${idx + 1}`,
+          accepted: Array.isArray(vars) ? vars : [vars],
+        };
+      }),
+      case_sensitive: Boolean(aKey.case_sensitive ?? qConfig.case_sensitive),
     };
   } else if (qType === QUESTION_TYPES.SHORT_ANSWER) {
     details = {
@@ -1157,6 +1323,7 @@ export function buildQuestionPreviewModel(questionOrDraft) {
     difficulty: source.difficulty || '',
     explanation: source.explanation || '',
     media,
+    stimulus,
     answerKeySummary: formatAnswerKeySummary(source),
     details,
   };
@@ -1172,6 +1339,10 @@ export function isAnswerProvided(questionRow, selectedOption, answerData) {
   }
   if (qType === QUESTION_TYPES.TRUE_FALSE) {
     return typeof answerData?.selected_answer === 'boolean';
+  }
+  if (qType === QUESTION_TYPES.FILL_BLANK) {
+    const blanks = answerData?.blanks;
+    return Boolean(blanks && typeof blanks === 'object' && Object.values(blanks).some((v) => typeof v === 'string' && v.trim().length > 0));
   }
   if (qType === QUESTION_TYPES.SHORT_ANSWER) {
     return typeof answerData?.text === 'string' && answerData.text.trim().length > 0;
@@ -1214,6 +1385,12 @@ export function formatStudentAnswerSummary(answerRow) {
   if (qType === QUESTION_TYPES.TRUE_FALSE) {
     if (typeof data.selected_answer !== 'boolean') return 'Not answered';
     return data.selected_answer ? 'True' : 'False';
+  }
+  if (qType === QUESTION_TYPES.FILL_BLANK) {
+    const blanks = data.blanks && typeof data.blanks === 'object' ? data.blanks : {};
+    const entries = Object.entries(blanks).filter(([, v]) => v && String(v).trim());
+    if (!entries.length) return 'Not answered';
+    return entries.map(([id, val]) => `${id}: "${val}"`).join('; ');
   }
   if (qType === QUESTION_TYPES.SHORT_ANSWER) {
     const text = typeof data.text === 'string' ? data.text.trim() : '';
@@ -1262,6 +1439,12 @@ export function formatCorrectAnswerSummary(questionOrAnswerRow) {
   if (qType === QUESTION_TYPES.TRUE_FALSE) {
     if (typeof aKey.correct_answer !== 'boolean') return '—';
     return aKey.correct_answer ? 'True' : 'False';
+  }
+  if (qType === QUESTION_TYPES.FILL_BLANK) {
+    const blanks = aKey.blanks && typeof aKey.blanks === 'object' ? aKey.blanks : {};
+    const entries = Object.entries(blanks);
+    if (!entries.length) return '—';
+    return entries.map(([id, vars]) => `${id}: ${(Array.isArray(vars) ? vars : [vars]).join(' / ')}`).join('; ');
   }
   if (qType === QUESTION_TYPES.SHORT_ANSWER) {
     const accepted = Array.isArray(aKey.accepted_answers) ? aKey.accepted_answers : [];
@@ -1338,6 +1521,18 @@ export function syncDraftFromForm(draft, form) {
     }
     if (data.has('true_text')) td.true_text = String(data.get('true_text') ?? 'True');
     if (data.has('false_text')) td.false_text = String(data.get('false_text') ?? 'False');
+  } else if (qType === QUESTION_TYPES.FILL_BLANK) {
+    td.blanks.forEach((b, bIdx) => {
+      const labelKey = `blank_label_${bIdx}`;
+      if (data.has(labelKey)) b.label = String(data.get(labelKey) ?? '');
+      b.variants = b.variants.map((v, vIdx) => {
+        const vKey = `blank_${bIdx}_variant_${vIdx}`;
+        return data.has(vKey) ? String(data.get(vKey) ?? '') : v;
+      });
+    });
+    if (form.elements?.case_sensitive) {
+      td.case_sensitive = Boolean(form.elements.case_sensitive.checked);
+    }
   } else if (qType === QUESTION_TYPES.SHORT_ANSWER) {
     td.accepted_answers = td.accepted_answers.map((val, idx) => {
       const key = `accepted_answer_${idx}`;
