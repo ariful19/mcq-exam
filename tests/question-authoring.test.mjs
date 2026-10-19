@@ -9,6 +9,12 @@ import {
   SUPPORTED_QUESTION_TYPES,
   getQuestionTypeMeta,
   createQuestionDraft,
+  createStimulusDraft,
+  useStimulusSnapshot,
+  buildQuestionPayloadFromDraft,
+  buildQuestionPreviewModel,
+  syncDraftFromForm,
+  shuffleOrderingIds,
   hasPopulatedTypeData,
   addMcqMultiOption,
   toggleMcqMultiCorrectOption,
@@ -931,4 +937,367 @@ test('student and teacher result reviews label positive partial credit clearly',
   } finally {
     cleanup();
   }
+});
+
+test('shared stimulus snapshots preserve identity, media accessibility, marks and independent draft copies', () => {
+  const source = {
+    id: 'stimulus-q21', title: 'Listen and answer', text: 'Use the same clip for the next questions.',
+    media: { type: 'audio', url: '/api/media/example.mp3', caption: 'Weather report', alt: 'Original metadata' },
+  };
+  const first = createQuestionDraft();
+  const second = createQuestionDraft();
+  useStimulusSnapshot(first, source);
+  useStimulusSnapshot(second, source);
+  first.marks = '2.5';
+  second.question_type = QUESTION_TYPES.YES_NO;
+  const firstPayload = buildQuestionPayloadFromDraft(first);
+  const secondPayload = buildQuestionPayloadFromDraft(second);
+  assert.deepEqual(firstPayload.stimulus, source);
+  assert.deepEqual(secondPayload.stimulus, source);
+  assert.equal(firstPayload.marks, 2.5);
+  assert.equal(firstPayload.stimulus.media.url, secondPayload.stimulus.media.url, 'Reuse must preserve the same media reference');
+  first.stimulus.id = '';
+  first.stimulus.title = 'Customized copy';
+  assert.equal(second.stimulus.title, source.title);
+  assert.equal(source.title, 'Listen and answer');
+  assert.equal(buildQuestionPayloadFromDraft(first).stimulus.id, undefined);
+  assert.equal(buildQuestionPayloadFromDraft(second).stimulus.id, source.id);
+  const hydrated = createQuestionDraft({
+    question_type: QUESTION_TYPES.YES_NO, question_text: 'Is it raining?',
+    category: 'Listening', question_config: { default_marks: 3, stimulus: source },
+    answer_key: { correct_answer: 'yes' },
+  });
+  assert.equal(hydrated.marks, '3');
+  assert.equal(hydrated.stimulus.id, source.id);
+  assert.equal(hydrated.stimulus.media_caption, source.media.caption);
+  assert.equal(buildQuestionPreviewModel(hydrated).stimulus.media.url, source.media.url);
+  hydrated.stimulus = createStimulusDraft();
+  assert.equal(buildQuestionPayloadFromDraft(hydrated).stimulus, null);
+});
+
+test('pending media drafts do not retain a fake URL and attaching a real URL clears pending state on form synchronization', () => {
+  const draft = createQuestionDraft({ question_type: 'yes_no', question_text: 'Read image', media: { type: 'image', placeholder: true, url: '[placeholder]', alt: 'Expected diagram', caption: 'Figure 1' } });
+  assert.equal(draft.media.url, '');
+  assert.equal(draft.media.placeholder, true);
+  assert.equal(buildQuestionPreviewModel(draft).media.placeholder, true);
+  assert.equal(buildQuestionPayloadFromDraft(draft).media.alt, 'Expected diagram');
+  assert.equal(buildQuestionPayloadFromDraft(draft).media.caption, 'Figure 1');
+  const NativeFormData = globalThis.FormData;
+  globalThis.FormData = class extends Map { constructor() { super([['media_mode', 'image'], ['media_url', '/api/media/diagram.png'], ['marks', '4']]); } };
+  try {
+    syncDraftFromForm(draft, {});
+    assert.equal(draft.media.placeholder, false);
+    assert.equal(draft.marks, '4');
+    assert.equal(buildQuestionPayloadFromDraft(draft).media.url, '/api/media/diagram.png');
+    assert.equal(buildQuestionPayloadFromDraft(draft).media.placeholder, undefined);
+  } finally { globalThis.FormData = NativeFormData; }
+});
+
+test('media preview handles pending, accessible playback, loading, error and shared rendering in both review screens', async () => {
+  const { McqApp, cleanup } = await loadMcqAppClass();
+  try {
+    const app = new McqApp();
+    const pending = renderLitValue(app.renderQuestionMedia({ type: 'image', placeholder: true, url: '[placeholder]' }));
+    assert.ok(pending.includes('Pending image attachment'));
+    assert.ok(!pending.includes('<img'));
+    const audio = { type: 'audio', url: '/api/media/clip.mp3', caption: 'Spoken instructions' };
+    let rendered = renderLitValue(app.renderQuestionMedia(audio, { key: 'test', label: 'Listening task' }));
+    assert.ok(rendered.includes('<audio controls preload="metadata"'));
+    assert.ok(rendered.includes('Spoken instructions'));
+    assert.ok(rendered.includes('Loading audio…'));
+    assert.ok(rendered.includes('data-on-error="bound"'));
+    app.setMediaStatus(`test:audio:${audio.url}`, 'error');
+    rendered = renderLitValue(app.renderQuestionMedia(audio, { key: 'test' }));
+    assert.ok(rendered.includes('Audio could not be loaded'));
+    assert.ok(rendered.includes('Retry audio'));
+    app.setMediaStatus(`test:audio:${audio.url}`, 'ready');
+    rendered = renderLitValue(app.renderQuestionMedia(audio, { key: 'test' }));
+    assert.ok(!rendered.includes('Loading audio…'));
+    assert.ok(!rendered.includes('Retry audio'));
+    const invalid = renderLitValue(app.renderQuestionMedia({ type: 'image', url: 'javascript:alert(1)' }));
+    assert.ok(invalid.includes('Media preview unavailable'));
+    assert.ok(!invalid.includes('<img'));
+    const answer = {
+      question_id: 1, question_type: 'yes_no', question_text: 'Did it rain?',
+      question_config: { stimulus: { id: 'stimulus-q1', title: 'Listening passage', text: 'Listen carefully.', media: audio } },
+      media: { type: 'image', url: '/api/media/map.png', alt: 'Weather map' },
+      answer_key: { correct_answer: 'yes' }, answer_data: { selected_answer: 'yes' }, marks: 2, marks_awarded: 2, is_correct: 1,
+    };
+    app.attempt = { id: 1, exam_title: 'Listening', student_name: 'Student', questions: [{ marks: 2 }], result: { score: 2, answers: [answer] } };
+    app.answerSheet = { ...app.attempt, status: 'submitted', score: 2, answers: [answer] };
+    for (const review of [app.renderStudentResult(), app.renderAnswerSheet()]) {
+      const html = renderLitValue(review);
+      assert.ok(html.includes('Listening passage'));
+      assert.ok(html.includes('Weather map'));
+      assert.ok(html.includes('/api/media/clip.mp3'));
+    }
+    app.attempt.result = { score: 2 };
+    assert.ok(!renderLitValue(app.renderStudentResult()).includes('Listening passage'), 'Hidden answer review must not expose media or reference content');
+  } finally { cleanup(); }
+});
+
+test('media upload clears placeholders, uses a single uploaded reference and quick removal supports versioned questions', async () => {
+  const { McqApp, cleanup } = await loadMcqAppClass();
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url, options });
+    return new Response(JSON.stringify(url.endsWith('/upload')
+      ? { url: '/api/media/uploaded.wav', type: 'audio' }
+      : { id: 101 }), { headers: { 'Content-Type': 'application/json' } });
+  };
+  try {
+    const app = new McqApp();
+    app.notify = (message, kind, details) => { app.toast = { message, kind, details }; };
+    app.loadAdminData = async () => {};
+    app.openQuickAttachMedia({ id: 10, question_text: 'Listen', media: { type: 'audio', placeholder: true }, locked: true });
+    assert.equal(app.quickMediaDraft.type, 'audio');
+    assert.ok(renderLitValue(app.renderQuickAttachModal()).includes('Pending audio attachment'));
+    const input = { files: [new File(['RIFF'], 'sound.wav', { type: 'audio/wav' })], value: 'sound.wav' };
+    await app.uploadQuestionMedia({ target: input }, app.quickMediaDraft);
+    assert.equal(input.value, '');
+    assert.equal(app.quickMediaDraft.placeholder, false);
+    assert.equal(app.quickMediaDraft.url, '/api/media/uploaded.wav');
+    assert.ok(renderLitValue(app.renderQuickAttachModal()).includes('Save media attachment'));
+    assert.equal(requests.length, 1);
+    await app.saveQuickAttachMedia({ preventDefault() {} });
+    assert.deepEqual(JSON.parse(requests[1].options.body), { media: { type: 'audio', url: '/api/media/uploaded.wav' } });
+    assert.ok(app.toast.message.includes('Question #101'));
+    assert.ok(app.toast.message.includes('Existing exams keep the original version'));
+    app.openQuickAttachMedia({ id: 11, media: { type: 'image', url: '/api/media/old.png' } });
+    await app.saveQuickAttachMedia(null, { remove: true });
+    assert.deepEqual(JSON.parse(requests[2].options.body), { media: null });
+    assert.equal(app.attachingMediaQuestion, null);
+    const stimulus = createStimulusDraft();
+    await app.uploadQuestionMedia({ target: input }, stimulus, { stimulus: true });
+    assert.equal(stimulus.media_url, '/api/media/uploaded.wav');
+    assert.equal(stimulus.enabled, true);
+    assert.equal(stimulus.media_placeholder, false);
+  } finally { globalThis.fetch = originalFetch; cleanup(); }
+});
+
+test('question bank media filters include shared media and reusable selector retains snapshot IDs', async () => {
+  const { McqApp, cleanup } = await loadMcqAppClass();
+  try {
+    const app = new McqApp();
+    app.questions = [
+      { id: 1, question_text: 'Pending', question_config: { stimulus: { media: { type: 'audio', placeholder: true } } } },
+      { id: 2, question_text: 'Attached', stimulus: { media: { type: 'image', url: '/api/media/map.png' } } },
+      { id: 3, question_text: 'Plain' },
+    ];
+    app.mediaFilter = 'pending';
+    assert.deepEqual(app.filteredQuestions.map((q) => q.id), [1]);
+    app.mediaFilter = 'with_media';
+    assert.deepEqual(app.filteredQuestions.map((q) => q.id), [2]);
+    app.openQuestionForm();
+    app.stimuli = [{ id: 'stimulus-q2', title: 'Shared map', media: { type: 'image', url: '/api/media/map.png', alt: 'Map' }, question_count: 2 }];
+    app.selectStimulus('stimulus-q2');
+    assert.equal(app.questionDraft.stimulus.id, 'stimulus-q2');
+    app.updateStimulusField('title', 'Should not mutate shared snapshot');
+    assert.equal(app.questionDraft.stimulus.title, 'Shared map');
+    const form = renderLitValue(app.renderQuestionForm());
+    assert.ok(form.includes('name="stimulus_reference"'));
+    assert.ok(form.includes('Customize a copy'));
+    assert.ok(form.includes('name="marks"'));
+    assert.ok(form.includes('2 questions'));
+    assert.ok(!form.includes('Upload stimulus file'), 'Shared snapshot is not editable until explicitly copied');
+  } finally { cleanup(); }
+});
+
+test('ordering initialization shuffles, stays stable across navigation and reload, and keeps accessible move controls', async () => {
+  const ids = ['I1', 'I2', 'I3', 'I4'];
+  assert.deepEqual(shuffleOrderingIds(ids, () => 0), ['I2', 'I3', 'I4', 'I1']);
+  assert.deepEqual(shuffleOrderingIds(ids, () => 0.999), ['I2', 'I1', 'I3', 'I4'], 'Identity shuffle must be changed');
+  assert.deepEqual(ids, ['I1', 'I2', 'I3', 'I4'], 'Original list must be untouched');
+  const { McqApp, cleanup } = await loadMcqAppClass();
+  const storage = globalThis.sessionStorage;
+  const values = new Map();
+  globalThis.sessionStorage = { getItem: (key) => values.get(key) || null, setItem: (key, value) => values.set(key, value), removeItem: (key) => values.delete(key) };
+  try {
+    const question = { id: 41, question_type: 'ordering', question_config: { items: ids.map((id) => ({ id, text: `Step ${id}` })) } };
+    const first = new McqApp();
+    first.attempt = { id: 71 };
+    const initial = [...first.initialOrderingIds(question)];
+    assert.notDeepEqual(initial, ids);
+    assert.deepEqual(new Set(initial), new Set(ids));
+    assert.deepEqual(first.initialOrderingIds(question), initial);
+    const second = new McqApp();
+    second.attempt = { id: 71 };
+    assert.deepEqual(second.initialOrderingIds(question), initial, 'Reload restores unchanged initial order');
+    let rendered = renderLitValue(second.renderStudentQuestionInput(question));
+    assert.ok(rendered.includes('Move Step I1 up'));
+    assert.ok(rendered.includes('Move Step I1 down'));
+    second.answerDataByQuestion[41] = { order: ['I4', 'I3', 'I2', 'I1'] };
+    rendered = renderLitValue(second.renderStudentQuestionInput(question));
+    assert.ok(rendered.indexOf('Step I4') < rendered.indexOf('Step I3'), 'Saved student order takes precedence over shuffled starting order');
+    second.attempt = { id: 72 };
+    second.initialOrderingIds(question);
+    assert.equal(JSON.parse(values.get('mcq-ordering-initial')).attemptId, 72);
+  } finally { if (storage === undefined) delete globalThis.sessionStorage; else globalThis.sessionStorage = storage; cleanup(); }
+});
+
+test('rich authored labels are safe and readable in plain summaries, while student text stays literal', async () => {
+  const row = {
+    question_type: 'mcq_multi', question_config: { options: [
+      { id: 'A', text: '<b>Alpha</b> &amp; Beta' },
+      { id: 'B', text: '<em>Gamma</em><script>bad()</script>' },
+    ] }, answer_key: { correct_options: ['A', 'B'] }, answer_data: { selected_options: ['A'] },
+  };
+  assert.equal(formatStudentAnswerSummary(row), 'A. Alpha & Beta');
+  assert.equal(formatCorrectAnswerSummary(row), 'A. Alpha & Beta, B. Gamma');
+  const textAnswer = { question_type: 'short_answer', question_config: {}, answer_data: { text: '<b>student literal</b>' } };
+  assert.equal(formatStudentAnswerSummary(textAnswer), '<b>student literal</b>');
+  const { McqApp, cleanup } = await loadMcqAppClass();
+  try {
+    const app = new McqApp();
+    const matching = {
+      question_type: 'matching', question_text: '<b>Match</b>', question_config: {
+        prompts: [{ id: 'P1', text: '<em>Author prompt</em>' }, { id: 'P2', text: 'Second' }],
+        choices: [{ id: 'C1', text: '<b>Author choice</b>' }, { id: 'C2', text: 'Other' }],
+      }, answer_key: { pairs: { P1: 'C1', P2: 'C2' } }, explanation: '<strong>Explanation</strong>',
+    };
+    const preview = renderLitValue(app.renderQuestionPreviewCard(buildQuestionPreviewModel(matching)));
+    assert.ok(preview.includes('<em>Author prompt</em>'));
+    assert.ok(preview.includes('<b>Author choice</b>'));
+    assert.ok(preview.includes('<strong>Explanation</strong>'));
+    const mcq = {
+      question_id: 1, question_type: 'mcq_single', question_text: 'Pick', option_a: '<b>Option A</b>', option_b: 'B', option_c: 'C', option_d: 'D',
+      correct_option: 'A', selected_option: 'A', explanation: '<em>Because</em>', marks: 1, marks_awarded: 1, is_correct: 1,
+    };
+    app.answerSheet = { student_name: 'Student', status: 'submitted', answers: [mcq] };
+    const sheet = renderLitValue(app.renderAnswerSheet());
+    assert.ok(sheet.includes('<b>Option A</b>'));
+    assert.ok(sheet.includes('<em>Because</em>'));
+  } finally { cleanup(); }
+});
+
+function orderingPointerHarness(McqApp, pointerType = 'touch') {
+  const listeners = new Map();
+  const windowListeners = new Map();
+  const document = {
+    hidden: false,
+    addEventListener: (name, listener) => listeners.set(name, listener),
+    removeEventListener: (name, listener) => { if (listeners.get(name) === listener) listeners.delete(name); },
+    defaultView: {
+      addEventListener: (name, listener) => windowListeners.set(name, listener),
+      removeEventListener: (name, listener) => { if (windowListeners.get(name) === listener) windowListeners.delete(name); },
+    },
+  };
+  const rows = [0, 1, 2].map((index) => ({ getBoundingClientRect: () => ({ top: index * 60, bottom: (index + 1) * 60 }) }));
+  const list = { getBoundingClientRect: () => ({ left: 10, right: 310, top: 0, bottom: 180 }), querySelectorAll: () => rows };
+  let captured = null;
+  const handle = {
+    ownerDocument: document, disabled: false, isConnected: true,
+    closest: (selector) => selector === '.student-ordering-list' ? list : null,
+    setPointerCapture: (id) => { captured = id; }, hasPointerCapture: (id) => captured === id,
+    releasePointerCapture: (id) => { if (captured === id) captured = null; },
+  };
+  const question = { id: 81, question_type: 'ordering', question_config: { items: ['I1', 'I2', 'I3'].map((id) => ({ id, text: id })) } };
+  const order = ['I1', 'I2', 'I3'];
+  const app = new McqApp();
+  app.page = 'exam';
+  app.attempt = { id: 91, status: 'in_progress', questions: [question] };
+  app.answerDataByQuestion[question.id] = { order: [...order] };
+  const saved = [];
+  app.saveStructuredAnswer = (target, value) => { saved.push({ questionId: target.id, ...value }); app.answerDataByQuestion[target.id] = value; };
+  const event = (overrides = {}) => ({ pointerType, pointerId: 7, isPrimary: true, button: 0, clientX: 30, clientY: 30, currentTarget: handle, preventDefault() { this.prevented = true; }, ...overrides });
+  return { app, question, order, handle, document, listeners, windowListeners, saved, event, captured: () => captured };
+}
+
+test('touch and pen handle dragging commits exactly once on valid release without mutating answers during movement', async () => {
+  const { McqApp, cleanup } = await loadMcqAppClass();
+  try {
+    for (const pointerType of ['touch', 'pen']) {
+      const h = orderingPointerHarness(McqApp, pointerType);
+      assert.equal(h.app.startOrderingPointerDrag(h.event(), h.question, h.order, 0), true);
+      assert.equal(h.captured(), 7);
+      assert.deepEqual([...h.listeners.keys()].sort(), ['keydown', 'pointercancel', 'pointermove', 'pointerup', 'visibilitychange']);
+      h.listeners.get('pointermove')(h.event({ clientY: 150 }));
+      assert.equal(h.app.orderingPointerDrag.toIndex, 2);
+      assert.equal(h.saved.length, 0, 'Moving only highlights the destination');
+      assert.deepEqual(h.app.answerDataByQuestion[81].order, h.order);
+      const rendering = renderLitValue(h.app.renderStudentQuestionInput(h.question));
+      assert.ok(rendering.includes('data-ordering-drag-handle'));
+      assert.ok(rendering.includes('ordering-drag-source'));
+      assert.ok(rendering.includes('ordering-drop-target'));
+      assert.ok(rendering.includes('Move I1 up'));
+      h.listeners.get('pointerup')(h.event({ clientY: 150 }));
+      assert.deepEqual(h.saved, [{ questionId: 81, order: ['I2', 'I3', 'I1'] }]);
+      assert.equal(h.app.orderingPointerDrag, null);
+      assert.equal(h.listeners.size, 0);
+      assert.equal(h.windowListeners.size, 0);
+      assert.equal(h.captured(), null);
+      assert.equal(h.app.finishOrderingPointerDrag(h.event({ clientY: 150 })), false);
+      assert.equal(h.saved.length, 1, 'Duplicate pointerup must not resubmit');
+    }
+  } finally { cleanup(); }
+});
+
+test('touch drag cancels on pointercancel, lost capture, Escape, blur, hidden document, navigation or invalid release', async () => {
+  const { McqApp, cleanup } = await loadMcqAppClass();
+  try {
+    const cancellations = [
+      (h) => h.listeners.get('pointercancel')(h.event()),
+      (h) => h.app.cancelOrderingPointerDrag(h.event()), // lostpointercapture uses this handler
+      (h) => h.listeners.get('keydown')({ key: 'Escape', preventDefault() {} }),
+      (h) => h.windowListeners.get('blur')({ type: 'blur' }),
+      (h) => { h.document.hidden = true; h.listeners.get('visibilitychange')(); },
+      (h) => { h.app.currentQuestion = 1; h.listeners.get('pointerup')(h.event({ clientY: 150 })); },
+      (h) => { h.app.page = 'home'; h.listeners.get('pointermove')(h.event({ clientY: 150 })); },
+      (h) => { h.app.busy = true; h.listeners.get('pointerup')(h.event({ clientY: 150 })); },
+      (h) => { h.app.attempt.status = 'submitted'; h.listeners.get('pointerup')(h.event({ clientY: 150 })); },
+      (h) => h.listeners.get('pointerup')(h.event({ clientX: 400, clientY: 150 })),
+    ];
+    for (const cancel of cancellations) {
+      const h = orderingPointerHarness(McqApp);
+      h.app.startOrderingPointerDrag(h.event(), h.question, h.order, 0);
+      h.listeners.get('pointermove')(h.event({ clientY: 150 }));
+      cancel(h);
+      assert.equal(h.saved.length, 0);
+      assert.deepEqual(h.app.answerDataByQuestion[81].order, h.order);
+      assert.equal(h.app.orderingPointerDrag, null);
+      assert.equal(h.listeners.size, 0);
+      assert.equal(h.windowListeners.size, 0);
+    }
+    const tap = orderingPointerHarness(McqApp);
+    tap.app.startOrderingPointerDrag(tap.event(), tap.question, tap.order, 0);
+    tap.listeners.get('pointerup')(tap.event({ clientY: 33 }));
+    assert.equal(tap.saved.length, 0, 'A small tap below the movement threshold is not a drag');
+  } finally { cleanup(); }
+});
+
+test('ordering pointer guards preserve normal scrolling, native mouse drag and disabled answer state', async () => {
+  const { McqApp, cleanup } = await loadMcqAppClass();
+  try {
+    for (const overrides of [{ pointerType: 'mouse' }, { isPrimary: false }, { button: 2 }]) {
+      const h = orderingPointerHarness(McqApp);
+      const event = h.event(overrides);
+      assert.equal(h.app.startOrderingPointerDrag(event, h.question, h.order, 0), false);
+      assert.equal(event.prevented, undefined, 'Ignored pointers must not suppress scrolling or native mouse behavior');
+      assert.equal(h.listeners.size, 0);
+    }
+    const h = orderingPointerHarness(McqApp);
+    h.app.startOrderingPointerDrag(h.event(), h.question, h.order, 0);
+    const otherPointer = h.event({ pointerId: 8, clientY: 150 });
+    assert.equal(h.app.updateOrderingPointerDrag(otherPointer), false);
+    assert.equal(otherPointer.prevented, undefined);
+    assert.equal(h.app.finishOrderingPointerDrag(otherPointer), false);
+    assert.equal(h.app.cancelOrderingPointerDrag(otherPointer), false);
+    assert.equal(h.app.orderingPointerDrag.pointerId, 7);
+    h.app.cancelOrderingPointerDrag();
+    for (const field of ['busy', 'pendingAnswerSaves', 'submitConfirmOpen', 'questionMoving']) {
+      h.app[field] = true;
+      assert.equal(h.app.startOrderingPointerDrag(h.event(), h.question, h.order, 0), false);
+      assert.equal(h.app.moveOrderingAnswer(h.question, h.order, 0, 1), false);
+      const rendering = renderLitValue(h.app.renderStudentQuestionInput(h.question));
+      assert.ok(rendering.includes('draggable=false'));
+      h.app[field] = false;
+    }
+    assert.equal(h.app.moveOrderingAnswer(h.question, h.order, 0, 1), true, 'Accessible arrows use the same guarded save operation');
+    assert.deepEqual(h.saved.at(-1).order, ['I2', 'I1', 'I3']);
+    assert.ok(renderLitValue(h.app.renderStudentQuestionInput(h.question)).includes('draggable=true'), 'Native desktop dragging remains available');
+    const css = fs.readFileSync(path.join(root, 'client/src/style.css'), 'utf8');
+    assert.match(css, /\.student-ordering-row \.drag-handle\s*\{[^}]*touch-action:\s*none/s);
+    assert.ok(!/\.student-ordering-(?:row|list)\s*\{[^}]*touch-action:\s*none/s.test(css), 'Rows and surrounding list must remain scrollable');
+  } finally { cleanup(); }
 });

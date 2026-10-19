@@ -227,7 +227,7 @@ export function generateResultPdf({ attempt, result, settings = {} }) {
   const tileGap = 3;
   const tileWidth = (contentWidth - tileGap * 3) / 4;
   const tileHeight = 15;
-  const scoreDisplay = Object.hasOwn(result, 'score') && result.score !== null ? `${result.score} / ${answers.length}` : 'Pending';
+  const scoreDisplay = Object.hasOwn(result, 'score') && result.score !== null ? `${result.score} / ${answers.reduce((sum, answer) => sum + (Number(answer.marks) || 1), 0)}` : 'Pending';
   const tiles = [
     { label: 'FINAL SCORE', value: scoreDisplay, bg: [238, 242, 255], border: [199, 210, 254], labelColor: [67, 56, 202], valColor: [49, 46, 129] },
     { label: 'CORRECT', value: String(correctCount), bg: [240, 253, 244], border: [187, 247, 208], labelColor: [21, 128, 61], valColor: [22, 101, 52] },

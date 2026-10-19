@@ -80,17 +80,15 @@ export function sanitizeRichText(input) {
   // Strip dangerous tags completely
   str = str.replace(/<\s*(script|style|iframe|object|embed|video|applet|meta|link|form|svg)\b[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, '');
   str = str.replace(/<\s*(script|style|iframe|object|embed|video|applet|meta|link|form|svg)\b[^>]*\/?>/gi, '');
-  // Strip dangerous event handler attributes (onerror, onclick, onload, etc.)
-  str = str.replace(/\son\w+\s*=\s*(['"]).*?\1/gi, '');
-  str = str.replace(/\son\w+\s*=\s*[^>\s]+/gi, '');
-  str = str.replace(/javascript:/gi, '');
+  // Allowed tags are rebuilt below without attributes, leaving ordinary wording intact.
 
   // Convert markdown bold, italic, strikethrough if present
   str = str.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
   str = str.replace(/~~(.*?)~~/g, '<del>$1</del>');
 
   // Keep only safe inline formatting tags: b, strong, i, em, u, s, del, strike, br, code, span
-  str = str.replace(/<([^>]+)>/g, (match, tagContent) => {
+  str = str.replace(/<((?:\/?[A-Za-z]|!)(?:[^"'<>]|"[^"]*"|'[^']*')*)>|[<>]/g, (match, tagContent) => {
+    if (tagContent === undefined) return match === '<' ? '&lt;' : '&gt;';
     const tagNameMatch = tagContent.match(/^(\/?)(b|strong|i|em|u|s|del|strike|br|code|span)\b/i);
     if (tagNameMatch) {
       const isClosing = tagNameMatch[1] === '/';
@@ -108,7 +106,7 @@ export function sanitizeRichText(input) {
     return ''; // strip any other tag
   });
 
-  return str;
+  return str.replace(/\r\n?|\n/g, '<br>');
 }
 
 export function formatQuestionBlanks(input) {
@@ -192,10 +190,8 @@ export function validateQuestionMedia(rawMedia) {
     errors.push('Media url is required when media is provided.');
   } else if (!isPlaceholder && url.length > 2048) {
     errors.push('Media url must be 2048 characters or fewer.');
-  } else if (!isPlaceholder && (/^data:video\//i.test(url) || /^javascript:/i.test(url))) {
-    errors.push('Media url uses an unsupported or unsafe protocol.');
-  } else if (!isPlaceholder && !/^(https?:\/\/|\/|data:image\/|data:audio\/)/i.test(url)) {
-    errors.push('Media url must be an http(s) URL, relative path, or image/audio data URI.');
+  } else if (!isPlaceholder && (/[\u0000-\u0020\\]/.test(url) || !/^(?:https?:\/\/[^/]|\/(?!\/))/i.test(url))) {
+    errors.push('Media url must be an http(s) URL or a single-slash relative path; data and unsafe URLs are not allowed.');
   }
   const alt = value.alt !== undefined && value.alt !== null ? String(value.alt).trim() : '';
   const caption = value.caption !== undefined && value.caption !== null ? String(value.caption).trim() : '';
@@ -227,6 +223,7 @@ export function validateQuestionStimulus(rawStimulus) {
     return { stimulus: null, errors };
   }
   const id = value.id ? String(value.id).trim() : '';
+  if (id && !/^[A-Za-z0-9_-]{1,100}$/.test(id)) errors.push('Stimulus id must contain only letters, numbers, hyphens or underscores (up to 100 characters).');
   const title = value.title ? String(value.title).trim().slice(0, 200) : '';
   const text = value.text ? sanitizeRichText(String(value.text).trim().slice(0, 10000)) : '';
 
@@ -289,7 +286,7 @@ function validateOptionsList(optionsInput, { minCount = 2, maxCount = 8, exactId
     }
     const rawId = String(item.id ?? '').trim();
     const id = exactIds ? rawId : rawId.toUpperCase();
-    const text = String(item.text ?? '').trim();
+    const text = sanitizeRichText(String(item.text ?? '').trim());
     if (!id) errors.push(`Option ${index + 1} id is required.`);
     else if (seenIds.has(id)) errors.push(`Duplicate option id "${id}" is not allowed.`);
     else seenIds.add(id);
@@ -577,19 +574,31 @@ export function normalizeQuestion(input = {}) {
   } else if (questionType === QUESTION_TYPES.FILL_BLANK) {
     let rawBlanks = configInput.blanks;
     let blankList = [];
+    if (rawBlanks !== undefined && (!Array.isArray(rawBlanks) || !rawBlanks.length)) errors.push('Blanks must be a nonempty array.');
     if (Array.isArray(rawBlanks) && rawBlanks.length > 0) {
-      blankList = rawBlanks.map((b, idx) => {
+      const seen = new Set();
+      if (rawBlanks.length > 30) errors.push('A question may contain at most 30 blanks.');
+      blankList = rawBlanks.flatMap((b, idx) => {
+        if (!isPlainObject(b)) {
+          errors.push(`Blank ${idx + 1} must be an object.`);
+          return [];
+        }
         const id = String(b.id || `B${idx + 1}`).trim().toUpperCase();
-        return {
+        if (!/^[A-Z][A-Z0-9_-]{0,49}$/.test(id) || seen.has(id)) errors.push(`Blank ${idx + 1} must have a unique valid id.`);
+        seen.add(id);
+        const maxLength = b.max_length === undefined ? 100 : Number(b.max_length);
+        if (!Number.isInteger(maxLength) || maxLength < 1 || maxLength > 250) errors.push(`Blank "${id}" max_length must be between 1 and 250.`);
+        return [{
           id,
           label: String(b.label || `Blank ${idx + 1}`).trim(),
-          max_length: Number.isInteger(Number(b.max_length)) ? Number(b.max_length) : 100,
+          max_length: maxLength,
           case_sensitive: Boolean(b.case_sensitive ?? configInput.case_sensitive ?? false),
-        };
+        }];
       });
     } else {
-      const blankMatches = questionText.match(/\[blank\d*\]|___|{{blank\d*}}/gi) || [];
+      const blankMatches = questionText.match(/(?:\[blank[\s\d_:-]*\]|\{\{blank[\s\d_:-]*\}\}|_{3,})/gi) || [];
       const count = blankMatches.length > 0 ? blankMatches.length : 1;
+      if (count > 30) errors.push('A question may contain at most 30 blanks.');
       blankList = Array.from({ length: count }, (_, idx) => ({
         id: `B${idx + 1}`,
         label: `Blank ${idx + 1}`,
@@ -616,7 +625,7 @@ export function normalizeQuestion(input = {}) {
           blankList.forEach((b, idx) => {
             rawBlankAnswers[b.id] = (parts[idx] || '').split('|').map((s) => s.trim()).filter(Boolean);
           });
-        } else {
+        } else if (blankList.length) {
           rawBlankAnswers = { [blankList[0].id]: [fallbackAns] };
         }
       }
@@ -633,6 +642,7 @@ export function normalizeQuestion(input = {}) {
         const normVariants = (Array.isArray(variants) ? variants : [variants])
           .map((v) => String(v ?? '').trim().normalize('NFC'))
           .filter(Boolean);
+        if (normVariants.some((variant) => variant.length > b.max_length)) errors.push(`Blank "${b.id}" accepted answers must fit max_length.`);
         if (!normVariants.length) {
           errors.push(`Blank "${b.id}" requires at least one accepted answer variant.`);
         } else {
@@ -778,6 +788,8 @@ export function normalizeQuestion(input = {}) {
   } else if (questionType === QUESTION_TYPES.ORDERING) {
     const { options: items, errors: itemErrors } = validateOptionsList(configInput.items, { minCount: 2, maxCount: 10, exactIds: null });
     if (itemErrors.length) errors.push(...itemErrors.map((e) => `items: ${e}`));
+    const visibleChunks = items.map((item) => item.text.replace(/<[^>]*>/g, '').replace(/&nbsp;/gi, ' ').trim().normalize('NFC'));
+    if (new Set(visibleChunks).size !== visibleChunks.length) errors.push('Ordering chunks must have distinct text.');
 
     const rawOrder = answerKeyInput.correct_order ?? input.correct_order;
     const correctOrder = [];
@@ -808,12 +820,22 @@ export function normalizeQuestion(input = {}) {
     optionD = '';
     correctOption = '';
     normalizedConfig = { items };
-    normalizedAnswerKey = { correct_order: correctOrder };
+    const existingPublicIds = isPlainObject(answerKeyInput.public_item_ids) ? answerKeyInput.public_item_ids : {};
+    const publicItemIds = Object.fromEntries(items.map(({ id }) => {
+      const previous = String(existingPublicIds[id] || '');
+      return [id, /^O[A-F0-9]{32}$/.test(previous) ? previous : `O${crypto.randomUUID().replaceAll('-', '').toUpperCase()}`];
+    }));
+    if (new Set(Object.values(publicItemIds)).size !== items.length) errors.push('Ordering public identifiers must be unique.');
+    normalizedAnswerKey = { correct_order: correctOrder, public_item_ids: publicItemIds };
   }
 
   if (stimulus) {
     normalizedConfig.stimulus = stimulus;
   }
+  const rawMarks = input.marks ?? input.Marks ?? configInput.default_marks;
+  const defaultMarks = rawMarks === undefined || rawMarks === '' ? 1 : Number(rawMarks);
+  if (!Number.isFinite(defaultMarks) || defaultMarks <= 0 || defaultMarks > 1000) errors.push('Marks must be a number greater than 0 and at most 1000.');
+  else if (defaultMarks !== 1) normalizedConfig.default_marks = defaultMarks;
 
   if (!category) errors.push('Subject is required.');
 
@@ -858,6 +880,12 @@ export function hydrateQuestionRow(row, { includeAnswerKey = true } = {}) {
   const media = isPlainObject(parsedMedia.value) && Object.keys(parsedMedia.value).length > 0 ? parsedMedia.value : null;
 
   if (!includeAnswerKey) {
+    // Hide both canonical sequence and position-encoded internal IDs. The private
+    // map lives with the answer key, never in the student-visible configuration.
+    if (questionType === QUESTION_TYPES.ORDERING && answerKey.public_item_ids) {
+      questionConfig.items = (questionConfig.items || []).map((item) => ({ ...item, id: answerKey.public_item_ids[item.id] }))
+        .sort((left, right) => left.id.localeCompare(right.id));
+    }
     return {
       id: row.id,
       question_text: row.question_text,
@@ -882,7 +910,7 @@ export function hydrateQuestionRow(row, { includeAnswerKey = true } = {}) {
   };
 }
 
-export function hydrateAnswerRow(row, { forActiveAttempt = false } = {}) {
+export function hydrateAnswerRow(row, { forActiveAttempt = false, questionRow = null } = {}) {
   if (!row) return null;
   const parsedAnswerData = parseJsonValue(row.answer_data, null);
   let answerData = isPlainObject(parsedAnswerData.value) ? parsedAnswerData.value : null;
@@ -890,6 +918,10 @@ export function hydrateAnswerRow(row, { forActiveAttempt = false } = {}) {
     answerData = { selected_option: row.selected_option };
   }
   if (forActiveAttempt) {
+    if (questionRow?.question_type === QUESTION_TYPES.ORDERING && Array.isArray(answerData?.order)) {
+      const map = hydrateQuestionRow(questionRow).answer_key.public_item_ids;
+      if (map) answerData = { ...answerData, order: answerData.order.map((id) => map[id]) };
+    }
     return {
       question_id: row.question_id,
       selected_option: row.selected_option ?? null,
@@ -907,7 +939,7 @@ export function hydrateAnswerRow(row, { forActiveAttempt = false } = {}) {
   };
 }
 
-export function validateStudentAnswer(questionRow, body = {}) {
+export function validateStudentAnswer(questionRow, body = {}, { publicOrderingIds = false } = {}) {
   if (!questionRow) {
     return { selected_option: null, answer_data: null, answerDataJson: null, error: 'That question is not part of this examination.' };
   }
@@ -1027,15 +1059,15 @@ export function validateStudentAnswer(questionRow, body = {}) {
     if ((hasAnswerData && dataObj === null) || (!hasAnswerData && (body.selected_option === null || body.selected_option === ''))) {
       return { selected_option: null, answer_data: null, answerDataJson: null, error: null };
     }
-    const rawBlanks = dataObj?.blanks ?? body.blanks;
+    let rawBlanks = dataObj?.blanks ?? body.blanks;
     if (rawBlanks === null || rawBlanks === undefined) {
       const fallbackText = dataObj?.text ?? body.text;
       if (typeof fallbackText === 'string' && fallbackText.trim()) {
         const firstBlankId = (qConfig.blanks?.[0]?.id) || 'B1';
-        const answerData = { blanks: { [firstBlankId]: fallbackText.trim() } };
-        return { selected_option: null, answer_data: answerData, answerDataJson: JSON.stringify(answerData), error: null };
+        rawBlanks = { [firstBlankId]: fallbackText };
+      } else {
+        return { selected_option: null, answer_data: null, answerDataJson: null, error: null };
       }
-      return { selected_option: null, answer_data: null, answerDataJson: null, error: null };
     }
     if (!isPlainObject(rawBlanks)) {
       return { selected_option: null, answer_data: null, answerDataJson: null, error: 'Fill in the blank response must be an object of blank values.' };
@@ -1048,9 +1080,11 @@ export function validateStudentAnswer(questionRow, body = {}) {
       if (!allowedBlankIds.has(bId)) {
         return { selected_option: null, answer_data: null, answerDataJson: null, error: `Invalid blank identifier "${k}".` };
       }
-      const valStr = typeof v === 'string' ? v.trim() : (v !== null && v !== undefined ? String(v).trim() : '');
-      if (valStr.length > 250) {
-        return { selected_option: null, answer_data: null, answerDataJson: null, error: `Blank "${bId}" answer is too long (maximum 250 characters).` };
+      if (v !== null && v !== undefined && typeof v !== 'string') return { selected_option: null, answer_data: null, answerDataJson: null, error: `Blank "${bId}" answer must be text.` };
+      const valStr = typeof v === 'string' ? v.trim() : '';
+      const maxLength = (qConfig.blanks || []).find((blank) => blank.id.toUpperCase() === bId)?.max_length || 100;
+      if (valStr.normalize('NFC').length > maxLength) {
+        return { selected_option: null, answer_data: null, answerDataJson: null, error: `Blank "${bId}" answer is too long (maximum ${maxLength} characters).` };
       }
       if (valStr) hasContent = true;
       normalized[bId] = valStr;
@@ -1148,11 +1182,14 @@ export function validateStudentAnswer(questionRow, body = {}) {
     if (rawOrder.length === 0) {
       return { selected_option: null, answer_data: null, answerDataJson: null, error: null };
     }
+    const publicMap = publicOrderingIds ? hydrated.answer_key.public_item_ids : null;
+    const internalIds = publicMap ? new Map(Object.entries(publicMap).map(([internal, visible]) => [visible, internal])) : null;
     const itemIds = new Set((qConfig.items || []).map((item) => item.id));
     const seen = new Set();
     const order = [];
     for (const val of rawOrder) {
-      const id = String(val ?? '').trim().toUpperCase();
+      const suppliedId = String(val ?? '').trim().toUpperCase();
+      const id = internalIds ? internalIds.get(suppliedId) : suppliedId;
       if (!itemIds.has(id) || seen.has(id)) {
         return { selected_option: null, answer_data: null, answerDataJson: null, error: 'Ordering answer must contain valid unique item IDs.' };
       }
@@ -1241,9 +1278,10 @@ export function evaluateQuestionAnswer(questionRow, answerRow, negativeMark = 0)
     const blankKeys = Object.keys(expectedBlanks);
     if (blankKeys.length === 0) return { answered: true, isCorrect: true, marksAwarded: marks };
 
-    const caseSensitive = Boolean(answerKey.case_sensitive);
     let allCorrect = true;
     for (const bId of blankKeys) {
+      const blankConfig = (qConfig.blanks || []).find((blank) => blank.id === bId);
+      const caseSensitive = Boolean(blankConfig?.case_sensitive ?? answerKey.case_sensitive);
       const studentVal = String(blanks[bId] ?? blanks[bId.toLowerCase()] ?? '').trim().normalize('NFC');
       const acceptedList = Array.isArray(expectedBlanks[bId]) ? expectedBlanks[bId] : [expectedBlanks[bId]];
       const matches = acceptedList.some((acc) => {
@@ -1376,6 +1414,17 @@ export const SQLITE_QUESTIONS_TRIGGERS_SQL = `
     END
     WHERE id = NEW.id;
   END;
+`;
+
+export const ORDERING_PUBLIC_IDS_SQL = `
+  UPDATE questions
+  SET answer_key=json_set(answer_key, '$.public_item_ids', json((
+    SELECT json_group_object(json_extract(item.value,'$.id'), 'O' || hex(randomblob(16)))
+    FROM json_each(question_config, '$.items') item
+  )))
+  WHERE question_type='ordering' AND json_valid(question_config) AND json_valid(answer_key)
+    AND json_type(question_config, '$.items')='array'
+    AND json_type(answer_key, '$.public_item_ids') IS NULL;
 `;
 
 export function migrateSqliteDatabase(db) {
@@ -1512,18 +1561,30 @@ export function migrateSqliteDatabase(db) {
       WHERE selected_option IS NOT NULL AND (answer_data IS NULL OR answer_data = '');
     `);
     db.exec(SQLITE_QUESTIONS_TRIGGERS_SQL);
+    db.exec(ORDERING_PUBLIC_IDS_SQL);
   })();
 }
 
 export function parseQuestionPaste(text, subject) {
   const errors = [];
-  const normalizedText = String(text ?? '').trim();
-  if (!normalizedText) return { questions: [], errors: ['Paste at least one formatted question.'] };
+  let normalizedText = String(text ?? '').trim();
+  let headerLines = 0;
+  const versionHeader = normalizedText.match(/^MCQ-PASTE:\s*(\S+)[^\S\r\n]*(?:\r?\n|$)/i);
+  if (versionHeader) {
+    if (versionHeader[1] !== '2') return { questions: [], errors: [`Line 1: Unsupported MCQ-PASTE version ${versionHeader[1]}; use version 2.`] };
+    normalizedText = normalizedText.slice(versionHeader[0].length);
+    headerLines = 1;
+  }
+  if (!normalizedText.trim()) return { questions: [], errors: ['Paste at least one formatted question.'] };
   const blocks = normalizedText.split(/\r?\n\s*\r?\n/).map((block) => block.trim()).filter(Boolean);
   if (blocks.length > 300) errors.push('A maximum of 300 questions can be imported at a time.');
   const questions = [];
 
+  let searchOffset = 0;
   blocks.forEach((block, index) => {
+    const offset = normalizedText.indexOf(block, searchOffset);
+    const blockLine = headerLines + normalizedText.slice(0, offset).split(/\r?\n/).length;
+    searchOffset = offset + block.length;
     const lines = block.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0);
     const questionNumber = index + 1;
     const details = [];
@@ -1537,6 +1598,7 @@ export function parseQuestionPaste(text, subject) {
     let questionType = '';
     let category = subject;
     let difficulty = '';
+    let marks;
     let explanation = '';
     let media = null;
     let stimulus = null;
@@ -1545,6 +1607,7 @@ export function parseQuestionPaste(text, subject) {
     let tolerance = 0;
     const orderingItems = [];
     const matchingPairs = [];
+    const seenFields = new Set();
 
     for (let i = 1; i < lines.length; i++) {
       const line = lines[i];
@@ -1557,7 +1620,14 @@ export function parseQuestionPaste(text, subject) {
       const stimMatch = line.match(/^Stimulus:\s*(.+)$/i);
       const optMatch = line.match(/^([A-H])[.)]\s*(.+)$/i);
       const numMatch = line.match(/^(\d+)[.)]\s*(.+)$/);
-      const tolMatch = line.match(/^Tolerance:\s*([\d.]+)$/i);
+      const tolMatch = line.match(/^Tolerance:\s*(.+)$/i);
+      const marksMatch = line.match(/^Marks:\s*(.+)$/i);
+      const field = line.match(/^(Type|Subject|Category|Difficulty|Explanation|Answer|Tolerance|Media|Stimulus|Marks):/i)?.[1].toLowerCase();
+      const key = field === 'category' ? 'subject' : field;
+      if (key) {
+        if (seenFields.has(key)) details.push(`Line ${blockLine + i}: Duplicate ${key} field.`);
+        seenFields.add(key);
+      }
       const matchPair = line.match(/^(?:(?:Match|Pair):\s*)?(.+?)\s*(?:->|=>)\s*(.+)$/i);
 
       if (typeMatch) {
@@ -1570,8 +1640,11 @@ export function parseQuestionPaste(text, subject) {
         explanation = expMatch[1].trim();
       } else if (ansMatch) {
         answer = ansMatch[1].trim();
+      } else if (marksMatch) {
+        marks = marksMatch[1].trim();
       } else if (tolMatch) {
         tolerance = Number(tolMatch[1]);
+        if (!Number.isFinite(tolerance) || tolerance < 0) details.push(`Line ${blockLine + i}: Tolerance must be a nonnegative number.`);
       } else if (mediaMatch) {
         const rawMedia = mediaMatch[1].trim();
         if (/\[image:\s*placeholder\]/i.test(rawMedia) || /^image\s+placeholder$/i.test(rawMedia)) {
@@ -1597,9 +1670,12 @@ export function parseQuestionPaste(text, subject) {
         });
       } else if (optMatch) {
         const letter = optMatch[1].toUpperCase();
+        if (Object.hasOwn(options, `option_${letter.toLowerCase()}`)) details.push(`Line ${blockLine + i}: Duplicate option ${letter}.`);
         options[`option_${letter.toLowerCase()}`] = optMatch[2].trim();
       } else if (numMatch) {
         orderingItems.push({ id: `I${numMatch[1]}`, text: numMatch[2].trim() });
+      } else {
+        details.push(`Line ${blockLine + i}: Unrecognized line. Use the documented field labels or <br> for a line break.`);
       }
     }
 
@@ -1640,6 +1716,7 @@ export function parseQuestionPaste(text, subject) {
       question_type: questionType,
       category,
       difficulty,
+      marks,
       explanation,
       media,
       stimulus,
@@ -1660,11 +1737,10 @@ export function parseQuestionPaste(text, subject) {
       payload.answer_key = { correct_options: correctArr };
     } else if (questionType === QUESTION_TYPES.TRUE_FALSE) {
       const lower = answer.toLowerCase();
-      const boolVal = lower === 'true' || lower === 'yes';
-      payload.answer_key = { correct_answer: boolVal };
+      payload.answer_key = { correct_answer: lower };
     } else if (questionType === QUESTION_TYPES.YES_NO) {
       const lower = answer.toLowerCase();
-      payload.answer_key = { correct_answer: lower === 'no' ? 'no' : 'yes' };
+      payload.answer_key = { correct_answer: lower };
     } else if (questionType === QUESTION_TYPES.FILL_BLANK) {
       payload.question_config = { case_sensitive: false };
       payload.answer_key = { accepted_answers: answer };
@@ -1672,11 +1748,11 @@ export function parseQuestionPaste(text, subject) {
       const accepted = answer.split('|').map((s) => s.trim()).filter(Boolean);
       payload.answer_key = { accepted_answers: accepted };
     } else if (questionType === QUESTION_TYPES.NUMERIC) {
-      payload.answer_key = { value: Number(answer), tolerance: tolerance || 0 };
+      payload.answer_key = { value: answer.trim() ? Number(answer) : NaN, tolerance };
     } else if (questionType === QUESTION_TYPES.ORDERING) {
       const rawOrder = answer.split(/[,;\s]+/).map((s) => s.trim()).filter(Boolean);
       const orderIds = rawOrder.map((tok) => tok.startsWith('I') ? tok.toUpperCase() : `I${tok}`);
-      payload.question_config = { items: orderingItems.length ? orderingItems : orderIds.map((id, idx) => ({ id, text: `Item ${idx + 1}` })) };
+      payload.question_config = { items: orderingItems };
       payload.answer_key = { correct_order: orderIds };
     } else if (questionType === QUESTION_TYPES.MATCHING) {
       const prompts = matchingPairs.map((p, idx) => ({ id: `P${idx + 1}`, text: p.prompt }));
@@ -1704,7 +1780,9 @@ export function parseQuestionPaste(text, subject) {
   return { questions, errors };
 }
 
-export const BULK_PASTE_SAMPLE = `1. What is the capital of France?
+export const BULK_PASTE_SAMPLE = `MCQ-PASTE: 2
+
+1. What is the capital of France?
 A. Rome
 B. Paris
 C. Madrid

@@ -51,7 +51,7 @@ export const QUESTION_TYPE_OPTIONS = Object.freeze(
 
 const RELEVANT_INPUTS_BY_TYPE = Object.freeze({
   [QUESTION_TYPES.MCQ_SINGLE]: Object.freeze({
-    sections: Object.freeze(['common', 'mcq_single', 'media', 'explanation']),
+    sections: Object.freeze(['common', 'mcq_single', 'stimulus', 'media', 'explanation']),
     inputs: Object.freeze([
       'question_type',
       'question_text',
@@ -62,12 +62,18 @@ const RELEVANT_INPUTS_BY_TYPE = Object.freeze({
       'correct_option',
       'category',
       'difficulty',
+      'marks',
+      'stimulus_reference',
+      'stimulus_title',
+      'stimulus_text',
+      'stimulus_media_url',
+      'stimulus_media_type',
       'media_type',
       'explanation',
     ]),
   }),
   [QUESTION_TYPES.MCQ_MULTI]: Object.freeze({
-    sections: Object.freeze(['common', 'mcq_multi', 'media', 'explanation']),
+    sections: Object.freeze(['common', 'mcq_multi', 'stimulus', 'media', 'explanation']),
     inputs: Object.freeze([
       'question_type',
       'question_text',
@@ -77,12 +83,18 @@ const RELEVANT_INPUTS_BY_TYPE = Object.freeze({
       'max_selections',
       'category',
       'difficulty',
+      'marks',
+      'stimulus_reference',
+      'stimulus_title',
+      'stimulus_text',
+      'stimulus_media_url',
+      'stimulus_media_type',
       'media_type',
       'explanation',
     ]),
   }),
   [QUESTION_TYPES.TRUE_FALSE]: Object.freeze({
-    sections: Object.freeze(['common', 'true_false', 'media', 'explanation']),
+    sections: Object.freeze(['common', 'true_false', 'stimulus', 'media', 'explanation']),
     inputs: Object.freeze([
       'question_type',
       'question_text',
@@ -91,24 +103,36 @@ const RELEVANT_INPUTS_BY_TYPE = Object.freeze({
       'false_text',
       'category',
       'difficulty',
+      'marks',
+      'stimulus_reference',
+      'stimulus_title',
+      'stimulus_text',
+      'stimulus_media_url',
+      'stimulus_media_type',
       'media_type',
       'explanation',
     ]),
   }),
   [QUESTION_TYPES.YES_NO]: Object.freeze({
-    sections: Object.freeze(['common', 'yes_no', 'media', 'explanation']),
+    sections: Object.freeze(['common', 'yes_no', 'stimulus', 'media', 'explanation']),
     inputs: Object.freeze([
       'question_type',
       'question_text',
       'yes_no_correct_answer',
       'category',
       'difficulty',
+      'marks',
+      'stimulus_reference',
+      'stimulus_title',
+      'stimulus_text',
+      'stimulus_media_url',
+      'stimulus_media_type',
       'media_type',
       'explanation',
     ]),
   }),
   [QUESTION_TYPES.FILL_BLANK]: Object.freeze({
-    sections: Object.freeze(['common', 'fill_blank', 'media', 'explanation']),
+    sections: Object.freeze(['common', 'fill_blank', 'stimulus', 'media', 'explanation']),
     inputs: Object.freeze([
       'question_type',
       'question_text',
@@ -116,12 +140,18 @@ const RELEVANT_INPUTS_BY_TYPE = Object.freeze({
       'case_sensitive',
       'category',
       'difficulty',
+      'marks',
+      'stimulus_reference',
+      'stimulus_title',
+      'stimulus_text',
+      'stimulus_media_url',
+      'stimulus_media_type',
       'media_type',
       'explanation',
     ]),
   }),
   [QUESTION_TYPES.SHORT_ANSWER]: Object.freeze({
-    sections: Object.freeze(['common', 'short_answer', 'media', 'explanation']),
+    sections: Object.freeze(['common', 'short_answer', 'stimulus', 'media', 'explanation']),
     inputs: Object.freeze([
       'question_type',
       'question_text',
@@ -131,12 +161,18 @@ const RELEVANT_INPUTS_BY_TYPE = Object.freeze({
       'placeholder',
       'category',
       'difficulty',
+      'marks',
+      'stimulus_reference',
+      'stimulus_title',
+      'stimulus_text',
+      'stimulus_media_url',
+      'stimulus_media_type',
       'media_type',
       'explanation',
     ]),
   }),
   [QUESTION_TYPES.NUMERIC]: Object.freeze({
-    sections: Object.freeze(['common', 'numeric', 'media', 'explanation']),
+    sections: Object.freeze(['common', 'numeric', 'stimulus', 'media', 'explanation']),
     inputs: Object.freeze([
       'question_type',
       'question_text',
@@ -147,12 +183,18 @@ const RELEVANT_INPUTS_BY_TYPE = Object.freeze({
       'placeholder',
       'category',
       'difficulty',
+      'marks',
+      'stimulus_reference',
+      'stimulus_title',
+      'stimulus_text',
+      'stimulus_media_url',
+      'stimulus_media_type',
       'media_type',
       'explanation',
     ]),
   }),
   [QUESTION_TYPES.MATCHING]: Object.freeze({
-    sections: Object.freeze(['common', 'matching', 'media', 'explanation']),
+    sections: Object.freeze(['common', 'matching', 'stimulus', 'media', 'explanation']),
     inputs: Object.freeze([
       'question_type',
       'question_text',
@@ -161,12 +203,18 @@ const RELEVANT_INPUTS_BY_TYPE = Object.freeze({
       'matching_pairs',
       'category',
       'difficulty',
+      'marks',
+      'stimulus_reference',
+      'stimulus_title',
+      'stimulus_text',
+      'stimulus_media_url',
+      'stimulus_media_type',
       'media_type',
       'explanation',
     ]),
   }),
   [QUESTION_TYPES.ORDERING]: Object.freeze({
-    sections: Object.freeze(['common', 'ordering', 'media', 'explanation']),
+    sections: Object.freeze(['common', 'ordering', 'stimulus', 'media', 'explanation']),
     inputs: Object.freeze([
       'question_type',
       'question_text',
@@ -174,6 +222,12 @@ const RELEVANT_INPUTS_BY_TYPE = Object.freeze({
       'correct_order',
       'category',
       'difficulty',
+      'marks',
+      'stimulus_reference',
+      'stimulus_title',
+      'stimulus_text',
+      'stimulus_media_url',
+      'stimulus_media_type',
       'media_type',
       'explanation',
     ]),
@@ -280,6 +334,39 @@ export function createEmptyTypeData() {
     [QUESTION_TYPES.MATCHING]: createDefaultTypeSlice(QUESTION_TYPES.MATCHING),
     [QUESTION_TYPES.ORDERING]: createDefaultTypeSlice(QUESTION_TYPES.ORDERING),
   };
+}
+
+export function shuffleOrderingIds(ids, random = Math.random) {
+  const shuffled = [...ids];
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const other = Math.floor(random() * (index + 1));
+    [shuffled[index], shuffled[other]] = [shuffled[other], shuffled[index]];
+  }
+  // Never hand the initial authored sequence straight back to the student.
+  if (shuffled.length > 1 && shuffled.every((id, index) => id === ids[index])) {
+    [shuffled[0], shuffled[1]] = [shuffled[1], shuffled[0]];
+  }
+  return shuffled;
+}
+
+export function createStimulusDraft(stimulus = null) {
+  return {
+    enabled: Boolean(stimulus && (stimulus.title || stimulus.text || stimulus.media)),
+    id: String(stimulus?.id ?? ''),
+    title: String(stimulus?.title ?? ''),
+    text: String(stimulus?.text ?? ''),
+    media_url: stimulus?.media?.placeholder ? '' : String(stimulus?.media?.url ?? ''),
+    media_type: stimulus?.media?.type === 'audio' ? 'audio' : 'image',
+    media_alt: String(stimulus?.media?.alt ?? ''),
+    media_caption: String(stimulus?.media?.caption ?? ''),
+    media_placeholder: Boolean(stimulus?.media?.placeholder),
+  };
+}
+
+export function useStimulusSnapshot(draft, stimulus) {
+  if (!draft) return draft;
+  draft.stimulus = createStimulusDraft(stimulus);
+  return draft;
 }
 
 export function createQuestionDraft(question = null) {
@@ -429,22 +516,17 @@ export function createQuestionDraft(question = null) {
     question_text: String(hydrated?.question_text ?? ''),
     category: String(hydrated?.category ?? ''),
     difficulty: String(hydrated?.difficulty ?? ''),
+    marks: String(hydrated?.question_config?.default_marks ?? hydrated?.marks ?? 1),
     explanation: String(hydrated?.explanation ?? ''),
     media: {
       enabled: Boolean(mediaObj?.type && (mediaObj?.url || mediaObj?.placeholder)),
       placeholder: Boolean(mediaObj?.placeholder),
       type: ALLOWED_MEDIA_TYPES.includes(mediaObj?.type) ? mediaObj.type : 'image',
-      url: String(mediaObj?.url ?? ''),
+      url: mediaObj?.placeholder ? '' : String(mediaObj?.url ?? ''),
       alt: String(mediaObj?.alt ?? ''),
       caption: String(mediaObj?.caption ?? ''),
     },
-    stimulus: {
-      enabled: Boolean(stimObj && (stimObj.title || stimObj.text || stimObj.media)),
-      title: String(stimObj?.title ?? ''),
-      text: String(stimObj?.text ?? ''),
-      media_url: String(stimObj?.media?.url ?? ''),
-      media_type: stimObj?.media?.type === 'audio' ? 'audio' : 'image',
-    },
+    stimulus: createStimulusDraft(stimObj),
     typeData,
     pendingTypeSwitch: null,
     lastSwitchNotice: null,
@@ -930,6 +1012,8 @@ export function buildQuestionPayloadFromDraft(draft) {
       media = {
         type: String(draft.media.type || 'image').trim().toLowerCase(),
         placeholder: true,
+        ...(String(draft.media.alt ?? '').trim() ? { alt: String(draft.media.alt).trim() } : {}),
+        ...(String(draft.media.caption ?? '').trim() ? { caption: String(draft.media.caption).trim() } : {}),
       };
     } else {
       media = {
@@ -944,9 +1028,15 @@ export function buildQuestionPayloadFromDraft(draft) {
   let stimulus = null;
   if (draft.stimulus?.enabled) {
     stimulus = {
+      ...(draft.stimulus.id ? { id: String(draft.stimulus.id).trim() } : {}),
       ...(draft.stimulus.title ? { title: String(draft.stimulus.title).trim() } : {}),
       ...(draft.stimulus.text ? { text: String(draft.stimulus.text).trim() } : {}),
-      ...(draft.stimulus.media_url ? { media: { type: draft.stimulus.media_type || 'image', url: draft.stimulus.media_url } } : {}),
+      ...(draft.stimulus.media_url || draft.stimulus.media_placeholder ? { media: {
+        type: draft.stimulus.media_type || 'image',
+        ...(draft.stimulus.media_placeholder ? { placeholder: true } : { url: String(draft.stimulus.media_url).trim() }),
+        ...(draft.stimulus.media_alt ? { alt: String(draft.stimulus.media_alt).trim() } : {}),
+        ...(draft.stimulus.media_caption ? { caption: String(draft.stimulus.media_caption).trim() } : {}),
+      } } : {}),
     };
   }
 
@@ -955,6 +1045,7 @@ export function buildQuestionPayloadFromDraft(draft) {
     question_text: String(draft.question_text ?? '').trim(),
     category: String(draft.category ?? '').trim(),
     difficulty: String(draft.difficulty ?? '').trim(),
+    marks: draft.marks === undefined ? 1 : Number(draft.marks),
     explanation: String(draft.explanation ?? '').trim(),
     media,
     stimulus,
@@ -1233,7 +1324,7 @@ export function buildQuestionPreviewModel(questionOrDraft) {
   const meta = getQuestionTypeMeta(qType);
   const qConfig = source.question_config || {};
   const aKey = source.answer_key || {};
-  const media = source.media && typeof source.media === 'object' && source.media.url ? source.media : null;
+  const media = source.media && typeof source.media === 'object' && (source.media.url || source.media.placeholder) ? source.media : null;
   const stimulus = source.stimulus || source.question_config?.stimulus || null;
 
   let details = {};
@@ -1412,6 +1503,19 @@ export function isAnswerProvided(questionRow, selectedOption, answerData) {
   return Boolean(selectedOption);
 }
 
+// Use only for authored rich labels, never for a student's literal text response.
+export function plainRichText(value) {
+  const entities = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+  return sanitizeRichText(value)
+    .replace(/<br\s*\/?>/gi, ' ')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);/gi, (match, entity) => {
+      if (!entity.startsWith('#')) return entities[entity.toLowerCase()] ?? match;
+      const code = entity[1].toLowerCase() === 'x' ? parseInt(entity.slice(2), 16) : Number(entity.slice(1));
+      return code > 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff) ? String.fromCodePoint(code) : match;
+    });
+}
+
 export function formatStudentAnswerSummary(answerRow) {
   if (!answerRow) return 'Not answered';
   const q = answerRow.question_config && typeof answerRow.question_config === 'object'
@@ -1426,12 +1530,12 @@ export function formatStudentAnswerSummary(answerRow) {
     if (!sel) return 'Not answered';
     const optMap = { A: q.option_a, B: q.option_b, C: q.option_c, D: q.option_d };
     const text = optMap[sel] ?? (qConfig.options || []).find((o) => o.id === sel)?.text ?? '';
-    return text ? `${sel}. ${text}` : `Option ${sel}`;
+    return text ? `${sel}. ${plainRichText(text)}` : `Option ${sel}`;
   }
   if (qType === QUESTION_TYPES.MCQ_MULTI) {
     const selected = Array.isArray(data.selected_options) ? data.selected_options : [];
     if (!selected.length) return 'Not answered';
-    const byId = new Map((qConfig.options || []).map((o) => [o.id, o.text]));
+    const byId = new Map((qConfig.options || []).map((o) => [o.id, plainRichText(o.text)]));
     return selected.map((id) => (byId.get(id) ? `${id}. ${byId.get(id)}` : id)).join(', ');
   }
   if (qType === QUESTION_TYPES.TRUE_FALSE) {
@@ -1459,13 +1563,13 @@ export function formatStudentAnswerSummary(answerRow) {
   if (qType === QUESTION_TYPES.MATCHING) {
     const pairs = data.pairs && typeof data.pairs === 'object' ? Object.entries(data.pairs).filter(([, v]) => v) : [];
     if (!pairs.length) return 'Not answered';
-    const choiceMap = new Map((qConfig.choices || []).map((c) => [c.id, c.text]));
+    const choiceMap = new Map((qConfig.choices || []).map((c) => [c.id, plainRichText(c.text)]));
     return pairs.map(([pId, cId]) => `${pId} → ${choiceMap.get(cId) ? `${cId} (${choiceMap.get(cId)})` : cId}`).join('; ');
   }
   if (qType === QUESTION_TYPES.ORDERING) {
     const order = Array.isArray(data.order) ? data.order : [];
     if (!order.length) return 'Not answered';
-    const itemMap = new Map((qConfig.items || []).map((i) => [i.id, i.text]));
+    const itemMap = new Map((qConfig.items || []).map((i) => [i.id, plainRichText(i.text)]));
     return order.map((id) => (itemMap.get(id) ? `${id} (${itemMap.get(id)})` : id)).join(' → ');
   }
   return 'Not answered';
@@ -1485,11 +1589,11 @@ export function formatCorrectAnswerSummary(questionOrAnswerRow) {
     if (!corr) return '—';
     const optMap = { A: q.option_a, B: q.option_b, C: q.option_c, D: q.option_d };
     const text = optMap[corr] ?? (qConfig.options || []).find((o) => o.id === corr)?.text ?? '';
-    return text ? `${corr}. ${text}` : `Option ${corr}`;
+    return text ? `${corr}. ${plainRichText(text)}` : `Option ${corr}`;
   }
   if (qType === QUESTION_TYPES.MCQ_MULTI) {
     const corr = Array.isArray(aKey.correct_options) ? aKey.correct_options : [];
-    const byId = new Map((qConfig.options || []).map((o) => [o.id, o.text]));
+    const byId = new Map((qConfig.options || []).map((o) => [o.id, plainRichText(o.text)]));
     return corr.map((id) => (byId.get(id) ? `${id}. ${byId.get(id)}` : id)).join(', ') || '—';
   }
   if (qType === QUESTION_TYPES.TRUE_FALSE) {
@@ -1518,12 +1622,12 @@ export function formatCorrectAnswerSummary(questionOrAnswerRow) {
   }
   if (qType === QUESTION_TYPES.MATCHING) {
     const pairs = aKey.pairs && typeof aKey.pairs === 'object' ? Object.entries(aKey.pairs) : [];
-    const choiceMap = new Map((qConfig.choices || []).map((c) => [c.id, c.text]));
+    const choiceMap = new Map((qConfig.choices || []).map((c) => [c.id, plainRichText(c.text)]));
     return pairs.map(([pId, cId]) => `${pId} → ${choiceMap.get(cId) ? `${cId} (${choiceMap.get(cId)})` : cId}`).join('; ') || '—';
   }
   if (qType === QUESTION_TYPES.ORDERING) {
     const order = Array.isArray(aKey.correct_order) ? aKey.correct_order : [];
-    const itemMap = new Map((qConfig.items || []).map((i) => [i.id, i.text]));
+    const itemMap = new Map((qConfig.items || []).map((i) => [i.id, plainRichText(i.text)]));
     return order.map((id) => (itemMap.get(id) ? `${id} (${itemMap.get(id)})` : id)).join(' → ') || '—';
   }
   return '—';
@@ -1542,6 +1646,14 @@ export function syncDraftFromForm(draft, form) {
   if (data.has('category')) draft.category = String(data.get('category') ?? '');
   if (data.has('difficulty')) draft.difficulty = String(data.get('difficulty') ?? '');
   if (data.has('explanation')) draft.explanation = String(data.get('explanation') ?? '');
+  if (data.has('marks')) draft.marks = String(data.get('marks') ?? '');
+  if (draft.stimulus && !draft.stimulus.id) {
+    for (const field of ['title', 'text', 'media_url', 'media_type', 'media_alt', 'media_caption']) {
+      if (data.has(`stimulus_${field}`)) draft.stimulus[field] = String(data.get(`stimulus_${field}`) ?? '');
+    }
+    if (draft.stimulus.media_url.trim()) draft.stimulus.media_placeholder = false;
+    draft.stimulus.enabled = Boolean(draft.stimulus.title || draft.stimulus.text || draft.stimulus.media_url || draft.stimulus.media_placeholder);
+  }
 
   if (data.has('media_mode')) {
     const mode = String(data.get('media_mode') ?? 'none').trim().toLowerCase();
@@ -1554,6 +1666,7 @@ export function syncDraftFromForm(draft, form) {
   }
   if (draft.media?.enabled) {
     if (data.has('media_url')) draft.media.url = String(data.get('media_url') ?? '');
+    if (draft.media.url.trim()) draft.media.placeholder = false;
     if (data.has('media_alt')) draft.media.alt = String(data.get('media_alt') ?? '');
     if (data.has('media_caption')) draft.media.caption = String(data.get('media_caption') ?? '');
   }

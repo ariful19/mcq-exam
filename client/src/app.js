@@ -13,6 +13,11 @@ import {
   getQuestionTypeMeta,
   getRelevantInputsForType,
   createQuestionDraft,
+  createStimulusDraft,
+  shuffleOrderingIds,
+  useStimulusSnapshot,
+  validateQuestionMedia,
+  plainRichText,
   switchQuestionDraftType,
   confirmPendingTypeSwitch,
   cancelPendingTypeSwitch,
@@ -48,6 +53,9 @@ import {
   formatCorrectAnswerSummary,
   BULK_PASTE_SAMPLE,
 } from './question-authoring.js';
+
+const MEDIA_FILE_ACCEPT = 'image/png,image/jpeg,image/gif,image/webp,audio/mpeg,audio/mp3,audio/wav,audio/x-wav,audio/ogg,audio/flac,audio/x-flac';
+const MEDIA_UPLOAD_HELP = 'Images: PNG, JPEG, GIF, WebP (up to 5 MiB). Audio: MP3, WAV, OGG, FLAC (up to 10 MiB).';
 
 const letters = ['A', 'B', 'C', 'D'];
 const optionKeys = { A: 'option_a', B: 'option_b', C: 'option_c', D: 'option_d' };
@@ -99,7 +107,16 @@ export class McqApp extends LitElement {
     this.typeFilter = '';
     this.mediaFilter = '';
     this.attachingMediaQuestion = null;
+    this.quickMediaDraft = null;
+    this.stimuli = [];
+    this.stimuliLoading = false;
+    this.stimuliError = '';
+    this.mediaStates = new Map();
+    this.mediaRetries = new Map();
     this.orderingInitialState = {};
+    this.orderingPointerDrag = null;
+    this.orderingNativeDrag = null;
+    this.orderingDragNotice = '';
     this.questionPage = 0;
     this.pageSize = 14;
     this.questionFormOpen = false;
@@ -180,6 +197,7 @@ export class McqApp extends LitElement {
   }
 
   disconnectedCallback() {
+    this.cancelOrderingPointerDrag();
     super.disconnectedCallback();
     clearInterval(this.timer);
     clearTimeout(this.toastTimer);
@@ -189,6 +207,7 @@ export class McqApp extends LitElement {
   }
 
   updated() {
+    if (this.orderingPointerDrag && !this.canReorderQuestion(this.orderingPointerDrag.question)) this.cancelOrderingPointerDrag();
     const dialog = this.querySelector?.('.question-dialog');
     const previewDialog = this.querySelector?.('.question-preview-dialog');
     const shouldOpenEditor = this.questionFormOpen && this.page === 'admin' && this.adminTab === 'questions';
@@ -333,7 +352,7 @@ export class McqApp extends LitElement {
   async loadAdminData() {
     try {
       const [questions, exams] = await Promise.all([
-        api('/api/admin/questions'), api('/api/admin/exams'),
+        api('/api/admin/questions'), api('/api/admin/exams'), this.loadStimuli(),
       ]);
       this.questions = questions;
       this.exams = exams;
@@ -385,9 +404,9 @@ export class McqApp extends LitElement {
       const matchesType = !this.typeFilter || qType === this.typeFilter;
       let matchesMedia = true;
       if (this.mediaFilter === 'pending') {
-        matchesMedia = Boolean(question.media && question.media.placeholder);
+        matchesMedia = Boolean(question.media?.placeholder || (question.stimulus || question.question_config?.stimulus)?.media?.placeholder);
       } else if (this.mediaFilter === 'with_media') {
-        matchesMedia = Boolean(question.media && !question.media.placeholder && question.media.url);
+        matchesMedia = [question.media, (question.stimulus || question.question_config?.stimulus)?.media].some((media) => media?.url && !media.placeholder);
       }
       return matchesText && matchesCategory && matchesDifficulty && matchesType && matchesMedia;
     });
@@ -472,6 +491,7 @@ export class McqApp extends LitElement {
 
   async saveQuestion(event) {
     event?.preventDefault?.();
+    if (this.busy) return null;
     this.questionSaveError = '';
     this.questionSaveDetails = [];
     if (!this.questionDraft) {
@@ -491,6 +511,7 @@ export class McqApp extends LitElement {
     }
 
     this.busy = true;
+    this.requestUpdate();
     try {
       const saved = await api(this.editingQuestion ? `/api/admin/questions/${this.editingQuestion.id}` : '/api/admin/questions', {
         method: this.editingQuestion ? 'PUT' : 'POST',
@@ -502,7 +523,9 @@ export class McqApp extends LitElement {
       this.questionDraft = null;
       this.editorPreviewOpen = false;
       await this.loadAdminData();
-      this.notify(this.editingQuestion ? 'Question updated.' : 'Question added to the bank.');
+      this.notify(this.editingQuestion && saved?.id !== this.editingQuestion.id
+        ? `Question saved as version #${saved.id}. Existing exams keep the original; use the new version when creating an exam.`
+        : this.editingQuestion ? 'Question updated.' : 'Question added to the bank.');
       return saved;
     } catch (error) {
       this.questionSaveError = error.message || 'Please correct the question details.';
@@ -523,92 +546,196 @@ export class McqApp extends LitElement {
     } catch (error) { this.notify(error.message, 'error'); }
   }
 
-  openQuickAttachMedia(question) {
-    this.attachingMediaQuestion = question;
+  async loadStimuli() {
+    this.stimuliLoading = true;
+    this.stimuliError = '';
+    this.requestUpdate();
+    try {
+      const stimuli = await api('/api/admin/stimuli');
+      this.stimuli = Array.isArray(stimuli) ? stimuli : [];
+    } catch (error) {
+      this.stimuliError = error.message || 'Could not load reusable stimuli.';
+    } finally {
+      this.stimuliLoading = false;
+      this.requestUpdate();
+    }
+  }
+
+  selectStimulus(id) {
+    if (!this.questionDraft || !id) return;
+    const stimulus = this.stimuli.find((item) => item.id === id);
+    if (!stimulus) return;
+    useStimulusSnapshot(this.questionDraft, stimulus);
     this.requestUpdate();
   }
 
+  updateStimulusField(field, value) {
+    const stimulus = this.questionDraft?.stimulus;
+    if (!stimulus || stimulus.id) return;
+    stimulus[field] = value;
+    if (field === 'media_url' && value.trim()) stimulus.media_placeholder = false;
+    stimulus.enabled = Boolean(stimulus.title || stimulus.text || stimulus.media_url || stimulus.media_placeholder);
+    this.requestUpdate();
+  }
+
+  async uploadQuestionMedia(event, target, { stimulus = false } = {}) {
+    const file = event.target.files?.[0];
+    if (!file || this.busy) return;
+    this.busy = true;
+    this.requestUpdate();
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      const uploaded = await api('/api/admin/media/upload', { method: 'POST', body: form });
+      if (stimulus) {
+        target.media_url = uploaded.url;
+        target.media_type = uploaded.type;
+        target.media_placeholder = false;
+      } else {
+        target.url = uploaded.url;
+        target.type = uploaded.type;
+        target.placeholder = false;
+      }
+      target.enabled = true;
+      this.notify('File uploaded. Save the question or attachment to keep this change.');
+    } catch (error) {
+      this.notify(error.message, 'error', error.details || []);
+    } finally {
+      event.target.value = '';
+      this.busy = false;
+      this.requestUpdate();
+    }
+  }
+
+  setMediaStatus(key, status) {
+    if (this.mediaStates.get(key) === status) return;
+    this.mediaStates.set(key, status);
+    this.requestUpdate();
+  }
+
+  renderQuestionMedia(media, { key = 'media', label = 'Question media' } = {}) {
+    if (!media) return '';
+    label = plainRichText(label);
+    if (media.placeholder) return html`<div class="media-pending-notice" role="status">⚠ Pending ${media.type === 'audio' ? 'audio' : 'image'} attachment. Add the media before publishing this question in an exam.</div>`;
+    if (!media.url) return '';
+    const checked = validateQuestionMedia(media);
+    if (checked.errors.length) return html`<p class="media-load-error" role="alert">Media preview unavailable. ${checked.errors.join(' ')}</p>`;
+    const valid = checked.media;
+    const stateKey = `${key}:${valid.type}:${valid.url}`;
+    const state = this.mediaStates.get(stateKey) || 'loading';
+    const attempt = this.mediaRetries.get(stateKey) || 0;
+    const audio = valid.type === 'audio';
+    const ready = () => this.setMediaStatus(stateKey, 'ready');
+    return keyed(`${stateKey}:${attempt}`, html`<figure class="question-media-box ${audio ? 'audio-media-box' : 'image-media-box'}" aria-label=${label}>
+      ${audio ? html`<audio controls preload="metadata" src=${valid.url} aria-label=${valid.caption || label}
+        @loadedmetadata=${ready} @canplay=${ready} @playing=${ready}
+        @waiting=${() => this.setMediaStatus(stateKey, 'buffering')}
+        @error=${() => this.setMediaStatus(stateKey, 'error')}>Your browser does not support audio playback.</audio>`
+        : html`<img src=${valid.url} alt=${valid.alt || label} loading="lazy" @load=${ready} @error=${() => this.setMediaStatus(stateKey, 'error')} />`}
+      ${state === 'error' ? html`<div class="media-load-error" role="alert">
+        <span>${audio ? 'Audio' : 'Image'} could not be loaded. Check your connection or ask the exam administrator for help.</span>
+        <button type="button" class="button button-outline button-small" @click=${() => {
+          this.mediaRetries.set(stateKey, attempt + 1);
+          this.setMediaStatus(stateKey, 'loading');
+        }}>Retry ${audio ? 'audio' : 'image'}</button>
+      </div>` : state === 'loading' || state === 'buffering' ? html`<p class="media-load-status" role="status">${state === 'buffering' ? 'Buffering audio…' : audio ? 'Loading audio…' : 'Loading image…'}</p>` : ''}
+      ${valid.caption ? html`<figcaption>${valid.caption}</figcaption>` : ''}
+    </figure>`);
+  }
+
+  renderStimulus(stimulus, key = 'stimulus') {
+    if (!stimulus) return '';
+    return html`<section class="stimulus-panel" aria-label="Shared reference stimulus">
+      <span class="eyebrow stimulus-eyebrow">READING / REFERENCE STIMULUS</span>
+      ${stimulus.title ? html`<h3 class="stimulus-title">${stimulus.title}</h3>` : ''}
+      ${stimulus.text ? html`<div class="stimulus-text">${unsafeHTML(sanitizeRichText(stimulus.text))}</div>` : ''}
+      ${this.renderQuestionMedia(stimulus.media, { key, label: stimulus.title || 'Reference stimulus' })}
+    </section>`;
+  }
+
+  openQuickAttachMedia(question) {
+    this.attachingMediaQuestion = question;
+    this.quickMediaDraft = createQuestionDraft(question).media;
+    this.quickMediaDraft.enabled = true;
+    this.requestUpdate();
+  }
+
+  closeQuickAttachMedia() {
+    if (this.busy) return;
+    this.attachingMediaQuestion = null;
+    this.quickMediaDraft = null;
+    this.requestUpdate();
+  }
+
+  async saveQuickAttachMedia(event, { remove = false } = {}) {
+    event?.preventDefault?.();
+    if (this.busy || !this.attachingMediaQuestion) return null;
+    const question = this.attachingMediaQuestion;
+    const draft = this.quickMediaDraft;
+    let media = null;
+    if (!remove) {
+      const checked = validateQuestionMedia({ type: draft.type, url: draft.url, alt: draft.alt, caption: draft.caption });
+      if (checked.errors.length) {
+        this.notify('Please provide a valid media URL or upload a file.', 'error', checked.errors);
+        return null;
+      }
+      media = checked.media;
+    }
+    this.busy = true;
+    this.requestUpdate();
+    try {
+      const saved = await api(`/api/admin/questions/${question.id}/media`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ media }),
+      });
+      this.attachingMediaQuestion = null;
+      this.quickMediaDraft = null;
+      await this.loadAdminData();
+      const versioned = saved?.id && saved.id !== question.id;
+      this.notify(`${remove ? 'Media removed' : 'Media saved'}${versioned ? ` as Question #${saved.id}. Existing exams keep the original version; reselect the new question in any draft exam` : ` for Question #${question.id}`}.`);
+      return saved;
+    } catch (error) {
+      this.notify(error.message, 'error', error.details || []);
+      return null;
+    } finally {
+      this.busy = false;
+      this.requestUpdate();
+    }
+  }
+
   renderQuickAttachModal() {
-    const q = this.attachingMediaQuestion;
-    if (!q) return '';
-    return html`<div class="modal-backdrop" @click=${(e) => { if (e.target === e.currentTarget) { this.attachingMediaQuestion = null; this.requestUpdate(); } }}>
+    const question = this.attachingMediaQuestion;
+    const draft = this.quickMediaDraft;
+    if (!question || !draft) return '';
+    return html`<div class="modal-backdrop" @click=${(event) => { if (event.target === event.currentTarget) this.closeQuickAttachMedia(); }}>
       <section class="modal-card quick-attach-modal" role="dialog" aria-modal="true" aria-labelledby="quick-attach-title">
-        <button class="icon-close modal-close" @click=${() => { this.attachingMediaQuestion = null; this.requestUpdate(); }}>×</button>
-        <span class="eyebrow muted">ATTACH MEDIA · QUESTION #${q.id}</span>
-        <h2 id="quick-attach-title">Attach question media</h2>
-        <p class="modal-intro">${q.question_text}</p>
-        <form class="stack-form" @submit=${async (e) => {
-          e.preventDefault();
-          const form = e.currentTarget;
-          const data = new FormData(form);
-          const url = String(data.get('url') || '').trim();
-          const type = String(data.get('type') || 'image');
-          const alt = String(data.get('alt') || '').trim();
-          const caption = String(data.get('caption') || '').trim();
-          if (!url) {
-            this.notify('Please provide a media URL or upload a file.', 'error');
-            return;
-          }
-          this.busy = true;
-          try {
-            await api(`/api/admin/questions/${q.id}/media`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ media: { type, url, alt, caption } }),
-            });
-            this.attachingMediaQuestion = null;
-            await this.loadAdminData();
-            this.notify(`Media attached to Question #${q.id}.`);
-          } catch (err) {
-            this.notify(err.message, 'error');
-          } finally {
-            this.busy = false;
-            this.requestUpdate();
-          }
-        }}>
+        <button type="button" class="icon-close modal-close" aria-label="Close media editor" ?disabled=${this.busy} @click=${() => this.closeQuickAttachMedia()}>×</button>
+        <span class="eyebrow muted">MEDIA · QUESTION #${question.id}</span>
+        <h2 id="quick-attach-title">${question.media?.placeholder ? 'Attach question media' : 'Manage question media'}</h2>
+        <p class="modal-intro">${cleanQuestionBlanks(question.question_text)}</p>
+        ${question.locked ? html`<p class="field-help">Saving or removing media creates a new bank version. Existing exams keep their original attachment.</p>` : ''}
+        <form class="stack-form" @submit=${(event) => this.saveQuickAttachMedia(event)}>
           <div class="field-row">
             <label>Media type
-              <select name="type">
-                <option value="image">Image</option>
-                <option value="audio">Audio clip</option>
+              <select name="type" .value=${draft.type} ?disabled=${this.busy} @change=${(event) => { draft.type = event.target.value; this.requestUpdate(); }}>
+                <option value="image" ?selected=${draft.type === 'image'}>Image</option>
+                <option value="audio" ?selected=${draft.type === 'audio'}>Audio clip</option>
               </select>
             </label>
-            <label class="button button-outline upload-button" style="align-self: flex-end; margin-bottom: 0;">
-              ↑ <span>Upload local file</span>
-              <input type="file" accept="image/*,audio/*" style="display:none" @change=${async (e) => {
-                const file = e.target.files?.[0];
-                if (!file) return;
-                const uploadForm = new FormData();
-                uploadForm.append('file', file);
-                this.busy = true;
-                try {
-                  const res = await api('/api/admin/media/upload', { method: 'POST', body: uploadForm });
-                  const urlInput = this.querySelector?.('.quick-attach-modal [name="url"]');
-                  const typeInput = this.querySelector?.('.quick-attach-modal [name="type"]');
-                  if (urlInput) urlInput.value = res.url;
-                  if (typeInput) typeInput.value = res.type;
-                  this.notify('File uploaded. Click Save media attachment to finish.');
-                } catch (err) {
-                  this.notify(err.message, 'error');
-                } finally {
-                  this.busy = false;
-                  this.requestUpdate();
-                }
-              }} />
+            <label class="button button-outline upload-button">↑ <span>${this.busy ? 'Working…' : 'Upload local file'}</span>
+              <input type="file" accept=${MEDIA_FILE_ACCEPT} ?disabled=${this.busy} @change=${(event) => this.uploadQuestionMedia(event, draft)} />
             </label>
           </div>
+          <small class="field-help">${MEDIA_UPLOAD_HELP}</small>
           <label>Media URL or uploaded path
-            <input name="url" required placeholder="https://... or /uploads/..." />
+            <input name="url" required maxlength="2048" .value=${draft.url} ?disabled=${this.busy} @input=${(event) => { draft.url = event.target.value; draft.placeholder = false; this.requestUpdate(); }} placeholder="https://… or /api/media/…" />
           </label>
-          <label>Alt text (for accessibility)
-            <input name="alt" placeholder="Describe the image" />
-          </label>
-          <label>Caption (optional)
-            <input name="caption" placeholder="Optional caption" />
-          </label>
+          ${draft.type === 'image' ? html`<label>Alt text (for accessibility)<input name="alt" maxlength="500" .value=${draft.alt} @input=${(event) => { draft.alt = event.target.value; this.requestUpdate(); }} placeholder="Describe the image" /></label>` : ''}
+          <label>Caption (optional)<input name="caption" maxlength="500" .value=${draft.caption} @input=${(event) => { draft.caption = event.target.value; this.requestUpdate(); }} /></label>
+          ${this.renderQuestionMedia(draft, { key: 'quick-attachment', label: 'Attachment preview' })}
           <div class="editor-actions">
-            <button type="button" class="button button-quiet" @click=${() => { this.attachingMediaQuestion = null; this.requestUpdate(); }}>Cancel</button>
-            <button class="button button-primary" ?disabled=${this.busy}>${this.busy ? 'Saving…' : 'Save media attachment'}</button>
+            ${question.media ? html`<button type="button" class="button button-quiet" ?disabled=${this.busy} @click=${(event) => this.saveQuickAttachMedia(event, { remove: true })}>Remove attachment</button>` : ''}
+            <button type="button" class="button button-quiet" ?disabled=${this.busy} @click=${() => this.closeQuickAttachMedia()}>Cancel</button>
+            <button class="button button-primary" ?disabled=${this.busy}>${this.busy ? 'Working…' : 'Save media attachment'}</button>
           </div>
         </form>
       </section>
@@ -1042,6 +1169,8 @@ export class McqApp extends LitElement {
   }
 
   async loadAttempt(token, expectedExamId = '') {
+    this.cancelOrderingPointerDrag();
+    this.orderingNativeDrag = null;
     const result = await api(`/api/attempts/${encodeURIComponent(token)}`);
     if (expectedExamId && String(result.exam_id) !== String(expectedExamId)) {
       if (typeof sessionStorage !== 'undefined') sessionStorage.removeItem('mcq-attempt-token');
@@ -1146,6 +1275,8 @@ export class McqApp extends LitElement {
 
   async submitAttempt(auto = false) {
     if (!this.attempt || this.attempt.status !== 'in_progress' || this.busy) return;
+    this.cancelOrderingPointerDrag();
+    this.orderingNativeDrag = null;
     if (!auto) {
       this.submitConfirmOpen = true;
       this.requestUpdate();
@@ -1178,12 +1309,17 @@ export class McqApp extends LitElement {
   }
 
   newAttempt() {
+    this.cancelOrderingPointerDrag();
+    this.orderingNativeDrag = null;
     clearInterval(this.timer);
     if (typeof sessionStorage !== 'undefined') sessionStorage.removeItem('mcq-attempt-token');
     this.resumeToken = '';
     this.attempt = null;
     this.answers = {};
     this.answerDataByQuestion = {};
+    this.orderingInitialState = {};
+    this.orderingAttemptId = undefined;
+    try { if (typeof sessionStorage !== 'undefined') sessionStorage.removeItem('mcq-ordering-initial'); } catch { /* Optional local cache. */ }
     this.page = 'home';
     this.directExam = null;
     this.directExamId = '';
@@ -1203,6 +1339,9 @@ export class McqApp extends LitElement {
 
   async goToQuestion(index) {
     if (this.questionMoving || index === this.currentQuestion || index < 0 || index >= this.attempt.questions.length) return;
+    this.cancelOrderingPointerDrag();
+    this.orderingNativeDrag = null;
+    this.orderingDragNotice = '';
     this.questionMoving = true;
     try {
       await slideQuestion(this.querySelector?.('.question-content'), Math.sign(index - this.currentQuestion), async () => {
@@ -1339,7 +1478,7 @@ export class McqApp extends LitElement {
     const penalty = Number(exam.negative_mark || 0);
     return html`<main class="direct-exam-page"><section class="direct-exam-card"><span class="eyebrow muted">PUBLIC EXAMINATION LINK</span><div class="direct-exam-heading"><div><h1>${exam.title}</h1><p>${exam.subject || 'Examination'} · ${exam.question_count} questions · ${exam.duration_minutes} minutes</p></div><span class="status-tag published">OPEN</span></div>
       ${exam.description ? html`<p class="direct-exam-description">${exam.description}</p>` : ''}
-      <div class="direct-exam-rule"><span>✦</span><span><b>Scoring rule</b><small>Each correct answer earns 1 mark. A wrong answer loses ${penalty} mark${penalty === 1 ? '' : 's'}; unanswered questions receive no penalty.</small></span></div>
+      <div class="direct-exam-rule"><span>✦</span><span><b>Scoring rule</b><small>Marks are shown for each question. Wrong answers lose ${penalty} mark${penalty === 1 ? '' : 's'} where applicable; Yes/No and multi-select questions use their own scoring rules. Unanswered questions receive no penalty.</small></span></div>
       <div class="direct-entry-heading"><h2>Enter your details to begin</h2><p>Your timer starts when you begin. Answers save automatically.</p></div>
       <form class="stack-form direct-entry-form" @submit=${this.startExam}>
         <label>Full name<input name="student_name" required maxlength="120" autocomplete="name" placeholder="Your name" /></label>
@@ -1393,11 +1532,108 @@ export class McqApp extends LitElement {
           ${this.filteredQuestions.length ? html`<div class="table-scroll"><table class="data-table question-table"><thead><tr><th>QUESTION</th><th>TYPE</th><th>SUBJECT</th><th>DIFFICULTY</th><th>KEY</th><th>STATUS</th><th></th></tr></thead><tbody>${pageQuestions.map((question) => {
             const typeBadge = formatQuestionTypeBadge(question);
             const keySummary = formatAnswerKeySummary(question);
-            return html`<tr><td><div class="question-cell"><span class="question-row-number">${String(question.id).padStart(2, '0')}</span><span title=${cleanQuestionBlanks(question.question_text)}>${unsafeHTML(renderQuestionText(question.question_text))}</span>${question.media?.placeholder ? html`<span class="media-placeholder-indicator" title="Pending media attachment">⚠️ Pending media</span>` : question.media?.type ? html`<span class="media-indicator" title=${`Includes ${question.media.type} media`}>${question.media.type === 'audio' ? '♪' : '🖼'}</span>` : ''}</div></td><td><span class="question-type-pill type-${question.question_type || 'mcq_single'}">${typeBadge.shortLabel}</span></td><td>${question.category || '—'}</td><td>${question.difficulty ? html`<span class="difficulty-tag ${question.difficulty.toLowerCase()}">${question.difficulty}</span>` : '—'}</td><td><span class="answer-key" title=${formatCorrectAnswerSummary(question)}>${keySummary}</span></td><td>${question.locked ? html`<span class="lock-tag" title="Existing exams retain their original question version">⌑ In exam</span>` : html`<span class="available-tag">Available</span>`}</td><td class="row-actions">${question.media?.placeholder ? html`<button type="button" class="attach-media-btn" aria-label="Attach media" title="Quick attach media file" @click=${() => this.openQuickAttachMedia(question)}>📎</button>` : ''}<button type="button" aria-label="Preview question" title="Preview question" @click=${() => this.openQuestionPreview(question)}>👁</button><button type="button" aria-label="Edit question" title="Edit question" @click=${() => this.openQuestionForm(question)}>✎</button><button type="button" aria-label="Delete question" title="Delete question" @click=${() => this.deleteQuestion(question)}>×</button></td></tr>`;
+            const stimulus = question.stimulus || question.question_config?.stimulus;
+            const media = [question.media, stimulus?.media].filter(Boolean);
+            const pendingMedia = media.some((item) => item.placeholder);
+            return html`<tr><td><div class="question-cell"><span class="question-row-number">${String(question.id).padStart(2, '0')}</span><span title=${cleanQuestionBlanks(question.question_text)}>${unsafeHTML(renderQuestionText(question.question_text))}</span>${pendingMedia ? html`<span class="media-placeholder-indicator" title="Pending media attachment">⚠️ Pending media</span>` : media.length ? html`<span class="media-indicator" title="Includes image or audio media">${media.some((item) => item.type === 'audio') ? '♪' : '🖼'}</span>` : ''}${stimulus ? html`<span class="media-indicator" title="Uses a shared reference stimulus">Reference</span>` : ''}</div></td><td><span class="question-type-pill type-${question.question_type || 'mcq_single'}">${typeBadge.shortLabel}</span></td><td>${question.category || '—'}</td><td>${question.difficulty ? html`<span class="difficulty-tag ${question.difficulty.toLowerCase()}">${question.difficulty}</span>` : '—'}</td><td><span class="answer-key" title=${formatCorrectAnswerSummary(question)}>${keySummary}</span></td><td>${question.locked ? html`<span class="lock-tag" title="Existing exams retain their original question version">⌑ In exam</span>` : html`<span class="available-tag">Available</span>`}</td><td class="row-actions">${question.media ? html`<button type="button" class="attach-media-btn" aria-label=${question.media.placeholder ? 'Attach media' : 'Manage media'} title="Attach, replace or remove media" @click=${() => this.openQuickAttachMedia(question)}>📎</button>` : ''}<button type="button" aria-label="Preview question" title="Preview question" @click=${() => this.openQuestionPreview(question)}>👁</button><button type="button" aria-label="Edit question" title="Edit question" @click=${() => this.openQuestionForm(question)}>✎</button><button type="button" aria-label="Delete question" title="Delete question" @click=${() => this.deleteQuestion(question)}>×</button></td></tr>`;
           })}</tbody></table></div>
             <div class="table-footer"><span>Showing ${this.filteredQuestions.length ? this.questionPage * this.pageSize + 1 : 0}–${Math.min((this.questionPage + 1) * this.pageSize, this.filteredQuestions.length)} of ${this.filteredQuestions.length}</span><div class="pagination"><button ?disabled=${this.questionPage === 0} @click=${() => { this.questionPage -= 1; this.requestUpdate(); }}>←</button><span>${this.questionPage + 1} / ${pageCount}</span><button ?disabled=${this.questionPage >= pageCount - 1} @click=${() => { this.questionPage += 1; this.requestUpdate(); }}>→</button></div></div>` : html`<div class="empty-state"><div class="empty-illustration">⌕</div><h3>No questions found</h3><p>Try changing the filters, import a workbook, or add a question.</p></div>`}
         </section>` : this.adminTab === 'exams' ? this.renderExamsAdmin() : this.renderPasswordSettings()}
     </main>`;
+  }
+
+  renderStimulusEditor(draft) {
+    const stimulus = draft.stimulus;
+    const shared = Boolean(stimulus.id);
+    const currentListed = this.stimuli.some((item) => item.id === stimulus.id);
+    const media = stimulus.media_url || stimulus.media_placeholder ? {
+      type: stimulus.media_type, url: stimulus.media_url, placeholder: stimulus.media_placeholder,
+      alt: stimulus.media_alt, caption: stimulus.media_caption,
+    } : null;
+    return html`<fieldset class="type-fieldset stimulus-fieldset" data-section="stimulus" ?disabled=${this.busy}>
+      <legend>Shared stimulus / Reading passage <span class="optional-label">OPTIONAL · PASSAGE, IMAGE OR AUDIO</span></legend>
+      <p class="field-help">Reuse one passage, image or audio clip across independently typed questions. No exam sections or duplicate uploads are needed. Saved exams keep their original version.</p>
+      <label>Reuse an existing stimulus
+        <select name="stimulus_reference" .value=${stimulus.id || ''} ?disabled=${this.stimuliLoading || this.busy} @change=${(event) => this.selectStimulus(event.target.value)}>
+          <option value="" disabled>Choose a reusable stimulus…</option>
+          ${shared && !currentListed ? html`<option value=${stimulus.id} selected>${stimulus.title || 'Current shared stimulus'}</option>` : ''}
+          ${this.stimuli.map((item) => html`<option value=${item.id} ?selected=${item.id === stimulus.id}>${item.title || plainRichText(cleanQuestionBlanks(item.text || '')).slice(0, 70) || (item.media?.type === 'audio' ? 'Audio stimulus' : 'Image stimulus')}${item.question_count ? ` · ${item.question_count} question${item.question_count === 1 ? '' : 's'}` : ''}</option>`)}
+        </select>
+      </label>
+      ${this.stimuliLoading ? html`<p class="field-help" role="status">Loading reusable stimuli…</p>` : this.stimuliError ? html`<p class="media-load-error" role="alert">Could not load reusable stimuli. <button type="button" class="button button-outline button-small" @click=${() => this.loadStimuli()}>Retry</button></p>` : !this.stimuli.length ? html`<p class="field-help">Create a stimulus below and save this question to make it available for reuse.</p>` : ''}
+      ${shared ? html`<div class="stimulus-reference-note"><span>Shared snapshot selected. Changes will not alter other questions or saved exams.</span><button type="button" class="button button-outline button-small" ?disabled=${this.busy} @click=${() => { stimulus.id = ''; this.requestUpdate(); }}>Customize a copy</button></div>` : ''}
+      <div class="stimulus-editor-grid">
+        <label>Stimulus title <span class="optional-label">OPTIONAL</span>
+          <input name="stimulus_title" maxlength="200" .value=${stimulus.title} ?readonly=${shared} @input=${(event) => this.updateStimulusField('title', event.target.value)} placeholder="e.g. Reading passage 1" />
+        </label>
+        <label class="full-field">Stimulus text / passage <span class="optional-label">OPTIONAL · SUPPORTS FORMATTING</span>
+          <textarea name="stimulus_text" rows="3" maxlength="10000" .value=${stimulus.text} ?readonly=${shared} @input=${(event) => this.updateStimulusField('text', event.target.value)} placeholder="Enter the reading passage, scenario, or context"></textarea>
+        </label>
+        <div class="type-subgrid two-col">
+          <label>Stimulus media URL <span class="optional-label">OPTIONAL</span>
+            <input name="stimulus_media_url" maxlength="2048" .value=${stimulus.media_url} ?readonly=${shared} @input=${(event) => this.updateStimulusField('media_url', event.target.value)} placeholder="https://… or /api/media/…" />
+          </label>
+          <label>Stimulus media type
+            <select name="stimulus_media_type" .value=${stimulus.media_type} ?disabled=${shared} @change=${(event) => this.updateStimulusField('media_type', event.target.value)}>
+              <option value="image" ?selected=${stimulus.media_type === 'image'}>Image</option>
+              <option value="audio" ?selected=${stimulus.media_type === 'audio'}>Audio clip</option>
+            </select>
+          </label>
+        </div>
+        ${!shared ? html`<label class="button button-outline upload-button">↑ <span>Upload stimulus file</span>
+          <input type="file" accept=${MEDIA_FILE_ACCEPT} ?disabled=${this.busy} @change=${(event) => this.uploadQuestionMedia(event, stimulus, { stimulus: true })} />
+        </label><small class="field-help">${MEDIA_UPLOAD_HELP}</small>` : ''}
+        ${media ? html`<div class="type-subgrid two-col">
+          ${stimulus.media_type === 'image' ? html`<label>Stimulus alt text <span class="optional-label">ACCESSIBILITY</span><input name="stimulus_media_alt" maxlength="500" .value=${stimulus.media_alt} ?readonly=${shared} @input=${(event) => this.updateStimulusField('media_alt', event.target.value)} /></label>` : ''}
+          <label>Stimulus caption <span class="optional-label">OPTIONAL</span><input name="stimulus_media_caption" maxlength="500" .value=${stimulus.media_caption} ?readonly=${shared} @input=${(event) => this.updateStimulusField('media_caption', event.target.value)} /></label>
+        </div>${this.renderQuestionMedia(media, { key: 'stimulus-editor', label: stimulus.title || 'Stimulus preview' })}
+        ${!shared ? html`<button type="button" class="button button-quiet button-small" ?disabled=${this.busy} @click=${() => {
+          stimulus.media_url = ''; stimulus.media_placeholder = false; stimulus.media_alt = ''; stimulus.media_caption = '';
+          stimulus.enabled = Boolean(stimulus.title || stimulus.text); this.requestUpdate();
+        }}>Remove stimulus media</button>` : ''}` : ''}
+      </div>
+      ${stimulus.enabled ? html`<button type="button" class="button button-quiet button-small" ?disabled=${this.busy} @click=${() => { draft.stimulus = createStimulusDraft(); this.requestUpdate(); }}>Remove stimulus from this question</button>` : ''}
+    </fieldset>`;
+  }
+
+  renderMediaEditor(draft) {
+    const media = draft.media;
+    return html`<fieldset class="type-fieldset media-fieldset" data-section="media" ?disabled=${this.busy}>
+      <legend>Question media <span class="optional-label">OPTIONAL · IMAGE OR AUDIO</span></legend>
+      <div class="media-editor-grid">
+        <label>Attachment type
+          <select name="media_mode" aria-label="Attachment type" .value=${media.enabled ? media.type : 'none'} @change=${(event) => {
+            const value = event.target.value;
+            media.enabled = value !== 'none';
+            if (media.enabled) media.type = value;
+            this.requestUpdate();
+          }}>
+            <option value="none" ?selected=${!media.enabled}>No media</option>
+            <option value="image" ?selected=${media.enabled && media.type === 'image'}>Image</option>
+            <option value="audio" ?selected=${media.enabled && media.type === 'audio'}>Audio clip</option>
+          </select>
+        </label>
+        ${media.enabled ? html`
+          <label class="media-url-field">${media.type === 'audio' ? 'Audio URL' : 'Image URL'}
+            <input name="media_url" ?required=${!media.placeholder} maxlength="2048" .value=${media.url} @input=${(event) => { media.url = event.target.value; if (media.url.trim()) media.placeholder = false; this.requestUpdate(); }} placeholder="https://… or /api/media/…" />
+          </label>
+          <label class="button button-outline upload-button">↑ <span>Upload local file</span>
+            <input type="file" accept=${MEDIA_FILE_ACCEPT} ?disabled=${this.busy} @change=${(event) => this.uploadQuestionMedia(event, media)} />
+          </label>
+          <small class="field-help">${MEDIA_UPLOAD_HELP}</small>
+          <label class="check-setting inline-check"><input name="media_placeholder" type="checkbox" .checked=${media.placeholder} @change=${(event) => { media.placeholder = event.target.checked; if (media.placeholder) media.url = ''; this.requestUpdate(); }} /><span><b>Attach later (draft only)</b><small>Pending media must be attached or removed before publishing an exam.</small></span></label>
+          ${media.type === 'image' ? html`<label>Alt text <span class="optional-label">ACCESSIBILITY</span>
+            <input name="media_alt" maxlength="500" .value=${media.alt} @input=${(event) => { media.alt = event.target.value; this.requestUpdate(); }} placeholder="Describe the image for screen readers" />
+          </label>` : ''}
+          <label>Caption <span class="optional-label">OPTIONAL</span>
+            <input name="media_caption" maxlength="500" .value=${media.caption} @input=${(event) => { media.caption = event.target.value; this.requestUpdate(); }} placeholder="Optional media caption" />
+          </label>
+          <div class="full-field">${this.renderQuestionMedia(media, { key: 'question-editor', label: 'Question attachment preview' })}
+            <button type="button" class="button button-quiet button-small" ?disabled=${this.busy} @click=${() => { draft.media = { enabled: false, placeholder: false, type: 'image', url: '', alt: '', caption: '' }; this.requestUpdate(); }}>Remove attachment</button>
+          </div>
+        ` : ''}
+      </div>
+    </fieldset>`;
   }
 
   renderQuestionForm() {
@@ -1442,6 +1678,9 @@ export class McqApp extends LitElement {
             ${['', 'Easy', 'Medium', 'Hard'].map((difficulty) => html`<option value=${difficulty} ?selected=${difficulty === (draft.difficulty || '')}>${difficulty || 'Choose…'}</option>`)}
           </select>
         </label>
+        <label>Marks
+          <input name="marks" type="number" min="0" max="1000" step="any" required .value=${String(draft.marks ?? 1)} @input=${(event) => { draft.marks = event.target.value; this.requestUpdate(); }} />
+        </label>
       </div>
 
       ${draft.pendingTypeSwitch ? this.renderPendingTypeSwitchPrompt(draft.pendingTypeSwitch) : ''}
@@ -1454,111 +1693,8 @@ export class McqApp extends LitElement {
 
       ${this.renderTypeSpecificEditorSection(draft)}
 
-      <fieldset class="type-fieldset stimulus-fieldset" data-section="stimulus">
-        <legend>Shared stimulus / Reading passage <span class="optional-label">OPTIONAL · PASSAGE OR AUDIO</span></legend>
-        <div class="stimulus-editor-grid">
-          <label>
-            Stimulus title <span class="optional-label">OPTIONAL</span>
-            <input name="stimulus_title" maxlength="200" .value=${draft.stimulus?.title || ''} @input=${(e) => {
-              if (!draft.stimulus) draft.stimulus = { enabled: true };
-              draft.stimulus.title = e.target.value;
-              draft.stimulus.enabled = Boolean(draft.stimulus.title || draft.stimulus.text || draft.stimulus.media_url);
-              this.requestUpdate();
-            }} placeholder="e.g. Reading passage 1" />
-          </label>
-          <label class="full-field">
-            Stimulus text / passage <span class="optional-label">OPTIONAL · SUPPORTS FORMATTING</span>
-            <textarea name="stimulus_text" rows="3" maxlength="4000" .value=${draft.stimulus?.text || ''} @input=${(e) => {
-              if (!draft.stimulus) draft.stimulus = { enabled: true };
-              draft.stimulus.text = e.target.value;
-              draft.stimulus.enabled = Boolean(draft.stimulus.title || draft.stimulus.text || draft.stimulus.media_url);
-              this.requestUpdate();
-            }} placeholder="Enter the reading passage, scenario, or context">${draft.stimulus?.text || ''}</textarea>
-          </label>
-          <div class="type-subgrid two-col">
-            <label>
-              Stimulus media URL <span class="optional-label">OPTIONAL</span>
-              <input name="stimulus_media_url" maxlength="2048" .value=${draft.stimulus?.media_url || ''} @input=${(e) => {
-                if (!draft.stimulus) draft.stimulus = { enabled: true };
-                draft.stimulus.media_url = e.target.value;
-                draft.stimulus.enabled = Boolean(draft.stimulus.title || draft.stimulus.text || draft.stimulus.media_url);
-                this.requestUpdate();
-              }} placeholder="https://... image or audio" />
-            </label>
-            <label>
-              Stimulus media type
-              <select name="stimulus_media_type" .value=${draft.stimulus?.media_type || 'image'} @change=${(e) => {
-                if (!draft.stimulus) draft.stimulus = { enabled: true };
-                draft.stimulus.media_type = e.target.value;
-                this.requestUpdate();
-              }}>
-                <option value="image">Image</option>
-                <option value="audio">Audio clip</option>
-              </select>
-            </label>
-          </div>
-        </div>
-      </fieldset>
-
-      <fieldset class="type-fieldset media-fieldset" data-section="media">
-        <legend>Question media <span class="optional-label">OPTIONAL · IMAGE OR AUDIO</span></legend>
-        <div class="media-editor-grid">
-          <label>
-            Attachment type
-            <select name="media_mode" aria-label="Attachment type" .value=${draft.media.enabled ? draft.media.type : 'none'} @change=${(event) => {
-              const val = event.target.value;
-              if (val === 'none') {
-                draft.media.enabled = false;
-              } else {
-                draft.media.enabled = true;
-                draft.media.type = val;
-              }
-              this.requestUpdate();
-            }}>
-              <option value="none" ?selected=${!draft.media.enabled}>No media</option>
-              <option value="image" ?selected=${draft.media.enabled && draft.media.type === 'image'}>Image (URL or data URI)</option>
-              <option value="audio" ?selected=${draft.media.enabled && draft.media.type === 'audio'}>Audio clip (URL or data URI)</option>
-            </select>
-          </label>
-          ${draft.media.enabled ? html`
-            <label class="media-url-field">
-              ${draft.media.type === 'audio' ? 'Audio URL' : 'Image URL'}
-              <input name="media_url" required maxlength="2048" .value=${draft.media.url} @input=${(event) => { draft.media.url = event.target.value; this.requestUpdate(); }} placeholder="https://example.com/asset.png or /assets/clip.mp3" />
-            </label>
-            <label class="button button-outline upload-button" style="align-self: flex-end; margin-bottom: 0;">
-              ↑ <span>Upload local file</span>
-              <input type="file" accept="image/*,audio/*" style="display:none" @change=${async (e) => {
-                const file = e.target.files?.[0];
-                if (!file) return;
-                const form = new FormData();
-                form.append('file', file);
-                this.busy = true;
-                try {
-                  const res = await api('/api/admin/media/upload', { method: 'POST', body: form });
-                  draft.media.url = res.url;
-                  draft.media.type = res.type;
-                  this.notify('File uploaded successfully.');
-                } catch (err) {
-                  this.notify(err.message, 'error');
-                } finally {
-                  this.busy = false;
-                  this.requestUpdate();
-                }
-              }} />
-            </label>
-            ${draft.media.type === 'image' ? html`
-              <label>
-                Alt text <span class="optional-label">ACCESSIBILITY</span>
-                <input name="media_alt" maxlength="500" .value=${draft.media.alt} @input=${(event) => { draft.media.alt = event.target.value; this.requestUpdate(); }} placeholder="Describe the image for screen readers" />
-              </label>
-            ` : ''}
-            <label>
-              Caption <span class="optional-label">OPTIONAL</span>
-              <input name="media_caption" maxlength="500" .value=${draft.media.caption} @input=${(event) => { draft.media.caption = event.target.value; this.requestUpdate(); }} placeholder="Optional media caption" />
-            </label>
-          ` : ''}
-        </div>
-      </fieldset>
+      ${this.renderStimulusEditor(draft)}
+      ${this.renderMediaEditor(draft)}
 
       <label class="full-field">
         Explanation <span class="optional-label">OPTIONAL</span>
@@ -1906,31 +2042,11 @@ export class McqApp extends LitElement {
         ${model.locked ? html`<span class="lock-tag">⌑ In exam</span>` : ''}
       </div>
 
-      ${model.stimulus ? html`
-        <div class="preview-stimulus-box">
-          <span class="eyebrow">REFERENCE STIMULUS</span>
-          ${model.stimulus.title ? html`<h5>${model.stimulus.title}</h5>` : ''}
-          ${model.stimulus.text ? html`<p>${unsafeHTML(sanitizeRichText(model.stimulus.text))}</p>` : ''}
-          ${model.stimulus.media?.url ? html`
-            <figure class="question-media-box">
-              ${model.stimulus.media.type === 'audio'
-                ? html`<audio controls preload="metadata" src=${model.stimulus.media.url}></audio>`
-                : html`<img src=${model.stimulus.media.url} alt=${model.stimulus.title || 'Stimulus media'} />`}
-            </figure>
-          ` : ''}
-        </div>
-      ` : ''}
+      ${this.renderStimulus(model.stimulus, 'preview-stimulus')}
 
       <h4 class="preview-question-title">${unsafeHTML(renderQuestionText(model.question_text || (isLiveDraft ? 'Question prompt will appear here…' : '—')))}</h4>
 
-      ${model.media ? html`
-        <figure class="question-media-box">
-          ${model.media.type === 'audio'
-            ? html`<audio controls preload="metadata" src=${model.media.url} aria-label=${model.media.caption || 'Question audio clip'}></audio>`
-            : html`<img src=${model.media.url} alt=${model.media.alt || model.question_text || 'Question illustration'} loading="lazy" />`}
-          ${model.media.caption ? html`<figcaption>${model.media.caption}</figcaption>` : ''}
-        </figure>
-      ` : ''}
+      ${this.renderQuestionMedia(model.media, { key: 'question-preview', label: model.question_text || 'Question illustration' })}
 
       ${qType === QUESTION_TYPES.MCQ_SINGLE ? html`
         <div class="selection-option-grid preview-options-grid">
@@ -1954,7 +2070,7 @@ export class McqApp extends LitElement {
       ${qType === QUESTION_TYPES.TRUE_FALSE ? html`
         <div class="selection-option-grid preview-options-grid">
           ${(d.options || []).map((opt) => html`<span class=${opt.isCorrect ? 'selection-correct-option' : ''}>
-            <strong>${opt.text}</strong>
+            <strong>${unsafeHTML(sanitizeRichText(opt.text))}</strong>
             ${opt.isCorrect ? html` <b class="correct-answer-label">✓ Correct answer</b>` : ''}
           </span>`)}
         </div>
@@ -1963,7 +2079,7 @@ export class McqApp extends LitElement {
       ${qType === QUESTION_TYPES.YES_NO ? html`
         <div class="selection-option-grid preview-options-grid">
           ${(d.options || []).map((opt) => html`<span class=${opt.isCorrect ? 'selection-correct-option' : ''}>
-            <strong>${opt.text}</strong>
+            <strong>${unsafeHTML(sanitizeRichText(opt.text))}</strong>
             ${opt.isCorrect ? html` <b class="correct-answer-label">✓ Correct answer</b>` : ''}
           </span>`)}
         </div>
@@ -1999,9 +2115,9 @@ export class McqApp extends LitElement {
         <div class="preview-structured-box">
           <div class="preview-pairs-list">
             ${(d.prompts || []).map((p) => html`<div class="preview-pair-item">
-              <span><strong>${p.id}.</strong> ${p.text || '—'}</span>
+              <span><strong>${p.id}.</strong> ${unsafeHTML(sanitizeRichText(p.text || '—'))}</span>
               <span class="pair-arrow">→</span>
-              <span class="selection-correct-option"><strong>${p.matchedChoiceId || '?'}.</strong> ${p.matchedChoiceText || '—'}</span>
+              <span class="selection-correct-option"><strong>${p.matchedChoiceId || '?'}.</strong> ${unsafeHTML(sanitizeRichText(p.matchedChoiceText || '—'))}</span>
             </div>`)}
           </div>
           ${(d.choices || []).length > (d.prompts || []).length ? html`<small class="preview-rule-note">Includes ${(d.choices || []).length - (d.prompts || []).length} extra distractor choice(s).</small>` : ''}
@@ -2011,19 +2127,19 @@ export class McqApp extends LitElement {
       ${qType === QUESTION_TYPES.ORDERING ? html`
         <div class="preview-structured-box">
           <ol class="preview-order-list">
-            ${(d.orderedItems || []).map((item) => html`<li><strong>${item.id}:</strong> ${item.text || '—'}</li>`)}
+            ${(d.orderedItems || []).map((item) => html`<li><strong>${item.id}:</strong> ${unsafeHTML(sanitizeRichText(item.text || '—'))}</li>`)}
           </ol>
         </div>
       ` : ''}
 
-      ${model.explanation ? html`<small class="selection-explanation">Explanation: ${model.explanation}</small>` : ''}
+      ${model.explanation ? html`<small class="selection-explanation">Explanation: ${unsafeHTML(sanitizeRichText(model.explanation))}</small>` : ''}
     </article>`;
   }
 
   renderQuestionInlineSummary(question) {
     const qType = question.question_type || DEFAULT_QUESTION_TYPE;
     if (qType === QUESTION_TYPES.MCQ_SINGLE) {
-      return html`<span class="selection-option-grid">${letters.map((letter) => html`<span class=${letter === question.correct_option ? 'selection-correct-option' : ''}><strong>${letter}.</strong> ${question[optionKeys[letter]]}${letter === question.correct_option ? html` <b class="correct-answer-label">✓ Correct answer</b>` : ''}</span>`)}</span>`;
+      return html`<span class="selection-option-grid">${letters.map((letter) => html`<span class=${letter === question.correct_option ? 'selection-correct-option' : ''}><strong>${letter}.</strong> ${unsafeHTML(sanitizeRichText(question[optionKeys[letter]]))}${letter === question.correct_option ? html` <b class="correct-answer-label">✓ Correct answer</b>` : ''}</span>`)}</span>`;
     }
     const model = buildQuestionPreviewModel(question);
     return html`<div class="selection-non-mcq-summary">
@@ -2156,11 +2272,11 @@ export class McqApp extends LitElement {
           <fieldset class="selection-fieldset"><legend>Question selection</legend>
             <label class="subject-select-label">Filter questions by subject<select .value=${this.examSubject} @change=${(event) => { this.examSubject = event.target.value; this.selectionSearch = ''; this.randomCount = 10; this.requestUpdate(); }}><option value="">All subjects (${this.questions.length})</option>${this.questionCategories.map((value) => html`<option value=${value}>${value} (${this.questions.filter((q) => q.category === value).length})</option>`)}</select></label>
             <div class="selection-switch"><button type="button" class=${this.selectionMode === 'manual' ? 'selected' : ''} @click=${() => { this.selectionMode = 'manual'; this.requestUpdate(); }}>☷ &nbsp; Manual selection</button><button type="button" class=${this.selectionMode === 'random' ? 'selected' : ''} @click=${() => { this.selectionMode = 'random'; this.requestUpdate(); }}>⤨ &nbsp; Random selection</button></div>
-            ${this.selectionMode === 'manual' ? html`<div class="selection-tools"><span>${this.examSubject ? `${availableForSubject.length} questions in ${this.examSubject}` : `${this.questions.length} questions across all subjects`}</span><label class="compact-search"><span>⌕</span><input placeholder="Find a question…" .value=${this.selectionSearch} @input=${(event) => { this.selectionSearch = event.target.value; this.requestUpdate(); }} /></label></div><div class="selection-list">${this.selectionQuestions.map((question) => html`<label class="selection-item"><input type="checkbox" .checked=${this.selectionIds.includes(question.id)} @change=${(event) => this.toggleSelectedQuestion(question.id, event.target.checked)} /><span class="selection-item-content"><div class="selection-item-head"><span class="category-pill">${question.category}</span><span class="question-type-pill type-${question.question_type || 'mcq_single'}">${formatQuestionTypeBadge(question).shortLabel}</span><b>${unsafeHTML(renderQuestionText(question.question_text))}</b></div>${this.renderQuestionInlineSummary(question)}${question.explanation ? html`<small class="selection-explanation">Explanation: ${question.explanation}</small>` : ''}<small>${question.difficulty || 'Difficulty not set'}</small></span></label>`)}</div>` : html`<div class="random-maker"><label>Number of questions<input type="number" min="1" max=${Math.max(1, availableForSubject.length)} .value=${String(this.randomCount)} ?disabled=${!availableForSubject.length} @input=${(event) => { this.randomCount = event.target.value; this.requestUpdate(); }} /></label><button type="button" class="button button-outline" ?disabled=${!availableForSubject.length} @click=${this.regenerateRandom}>⟳ Regenerate selection</button><div class="random-preview"><span class="preview-icon">✧</span><div><b>${this.selectionIds.length ? `${this.selectionIds.length} questions selected` : 'Preview your random selection'}</b><small>${availableForSubject.length ? `Random picks use ${this.examSubject ? `${this.examSubject} questions.` : 'all available questions.'}` : 'No questions found.'}</small></div></div></div>`}
-          <div class="selection-footer"><span><b>${this.selectionIds.length}</b> question${this.selectionIds.length === 1 ? '' : 's'} selected${selectedCategories.length > 1 ? ` across ${selectedCategories.length} subjects` : selectedCategories.length === 1 ? ` (${selectedCategories[0]})` : ''}</span><span>1 mark each · −${Number(this.querySelector?.('[name="negative_mark"]')?.value || 1)} for a wrong answer</span></div>
-            ${selectedQuestions.length ? html`<div class="selected-questions-preview" aria-label="Full selected question preview">${selectedQuestions.map((q, index) => html`<article class="selected-question-preview"><div class="selected-preview-heading"><span>${String(index + 1).padStart(2, '0')}</span><span class="category-pill">${q.category}</span><span class="question-type-pill type-${q.question_type || 'mcq_single'}">${formatQuestionTypeBadge(q).shortLabel}</span><b>${unsafeHTML(renderQuestionText(q.question_text))}</b><button type="button" class="remove-selection-btn" title="Remove question" aria-label="Remove question ${index + 1}" @click=${() => this.toggleSelectedQuestion(q.id, false)}>×</button></div>${this.renderQuestionInlineSummary(q)}${q.explanation ? html`<small class="selection-explanation">Explanation: ${q.explanation}</small>` : ''}</article>`)}</div>` : ''}
+            ${this.selectionMode === 'manual' ? html`<div class="selection-tools"><span>${this.examSubject ? `${availableForSubject.length} questions in ${this.examSubject}` : `${this.questions.length} questions across all subjects`}</span><label class="compact-search"><span>⌕</span><input placeholder="Find a question…" .value=${this.selectionSearch} @input=${(event) => { this.selectionSearch = event.target.value; this.requestUpdate(); }} /></label></div><div class="selection-list">${this.selectionQuestions.map((question) => html`<label class="selection-item"><input type="checkbox" .checked=${this.selectionIds.includes(question.id)} @change=${(event) => this.toggleSelectedQuestion(question.id, event.target.checked)} /><span class="selection-item-content"><div class="selection-item-head"><span class="category-pill">${question.category}</span><span class="question-type-pill type-${question.question_type || 'mcq_single'}">${formatQuestionTypeBadge(question).shortLabel}</span><b>${unsafeHTML(renderQuestionText(question.question_text))}</b></div>${question.media?.placeholder || (question.stimulus || question.question_config?.stimulus)?.media?.placeholder ? html`<small class="media-placeholder-indicator">Pending media: attach or remove before publishing</small>` : ''}${this.renderQuestionInlineSummary(question)}${question.explanation ? html`<small class="selection-explanation">Explanation: ${unsafeHTML(sanitizeRichText(question.explanation))}</small>` : ''}<small>${question.difficulty || 'Difficulty not set'}</small></span></label>`)}</div>` : html`<div class="random-maker"><label>Number of questions<input type="number" min="1" max=${Math.max(1, availableForSubject.length)} .value=${String(this.randomCount)} ?disabled=${!availableForSubject.length} @input=${(event) => { this.randomCount = event.target.value; this.requestUpdate(); }} /></label><button type="button" class="button button-outline" ?disabled=${!availableForSubject.length} @click=${this.regenerateRandom}>⟳ Regenerate selection</button><div class="random-preview"><span class="preview-icon">✧</span><div><b>${this.selectionIds.length ? `${this.selectionIds.length} questions selected` : 'Preview your random selection'}</b><small>${availableForSubject.length ? `Random picks use ${this.examSubject ? `${this.examSubject} questions.` : 'all available questions.'}` : 'No questions found.'}</small></div></div></div>`}
+          <div class="selection-footer"><span><b>${this.selectionIds.length}</b> question${this.selectionIds.length === 1 ? '' : 's'} selected${selectedCategories.length > 1 ? ` across ${selectedCategories.length} subjects` : selectedCategories.length === 1 ? ` (${selectedCategories[0]})` : ''}</span><span>${selectedQuestions.reduce((sum, question) => sum + Number(question.question_config?.default_marks ?? 1), 0)} total marks · Per-question scoring</span></div>
+            ${selectedQuestions.length ? html`<div class="selected-questions-preview" aria-label="Full selected question preview">${selectedQuestions.map((q, index) => html`<article class="selected-question-preview"><div class="selected-preview-heading"><span>${String(index + 1).padStart(2, '0')}</span><span class="category-pill">${q.category}</span><span class="question-type-pill type-${q.question_type || 'mcq_single'}">${formatQuestionTypeBadge(q).shortLabel}</span><b>${unsafeHTML(renderQuestionText(q.question_text))}</b><button type="button" class="remove-selection-btn" title="Remove question" aria-label="Remove question ${index + 1}" @click=${() => this.toggleSelectedQuestion(q.id, false)}>×</button></div>${this.renderQuestionInlineSummary(q)}${q.explanation ? html`<small class="selection-explanation">Explanation: ${unsafeHTML(sanitizeRichText(q.explanation))}</small>` : ''}</article>`)}</div>` : ''}
           </fieldset>
-          <div class="field-row"><label>Wrong answer penalty<select name="negative_mark" required><option value="0">0 marks (No penalty)</option><option value="1">−1 mark</option><option value="0.25">−0.25 mark</option><option value="0.5">−0.50 mark</option></select><small class="field-help">Unanswered questions receive no penalty.</small></label><label>Initial status<select name="status"><option value="published">Published</option><option value="draft">Draft</option></select></label></div>
+          <div class="field-row"><label>Wrong answer penalty<select name="negative_mark" required><option value="0">0 marks (No penalty)</option><option value="1">−1 mark</option><option value="0.25">−0.25 mark</option><option value="0.5">−0.50 mark</option></select><small class="field-help">Applies to eligible wrong answers. Yes/No and multi-select use their own scoring; unanswered questions receive no penalty.</small></label><label>Initial status<select name="status"><option value="published">Published</option><option value="draft">Draft</option></select></label></div>
           <div class="settings-row"><div class="result-settings"><span class="setting-title">Student results</span><label class="check-setting"><input name="show_score" type="checkbox" @change=${(event) => { const answerBox = this.querySelector?.('[name="show_answers"]'); if (answerBox) { answerBox.disabled = !event.target.checked; if (!event.target.checked) answerBox.checked = false; } }} /><span><b>Show final score</b><small>Students can see their total mark.</small></span></label><label class="check-setting"><input name="show_answers" type="checkbox" disabled /><span><b>Show answer review</b><small>Students can review correct answers and explanations.</small></span></label><label class="check-setting"><input name="allow_pdf_download" type="checkbox" /><span><b>Allow PDF download</b><small>Students can download their result report and answer sheet with explanations as PDF.</small></span></label></div></div>
           <button class="button button-primary button-full" ?disabled=${this.busy}>${this.busy ? 'Creating examination…' : 'Create examination'} <span aria-hidden="true">→</span></button>
         </form>
@@ -2196,7 +2312,7 @@ export class McqApp extends LitElement {
         </select></label>
         <span class="result-match-count" role="status">${results.length} of ${this.attempts.length} results</span>
       </div>` : ''}
-      ${results.length ? html`<div class="attempt-list">${results.map((attempt) => html`<div class="attempt-list-item"><button class="attempt-row" @click=${() => this.openAnswerSheet(attempt)}><span class="attempt-avatar">${attempt.student_name.slice(0, 1).toUpperCase()}</span><span class="attempt-person"><b>${attempt.student_name}</b><small>Roll ${attempt.roll_number}${attempt.email ? ` · ${attempt.email}` : ''}</small></span><span class="attempt-score">${attempt.score === null ? '—' : `${attempt.score} / ${exam.question_count}`}</span><span class="status-tag ${attempt.status}">${attempt.status.replace('_', ' ')}</span><span class="row-arrow">→</span></button><button class="button button-danger button-small" aria-label=${`Delete result sheet for ${attempt.student_name}, roll ${attempt.roll_number}`} @click=${() => this.deleteAttempt(attempt)}>Delete result sheet</button></div>`)}</div>` : html`<div class="empty-inline">${this.attempts.length ? "No results match your search. Try another name or roll number." : "No participants yet. Share the published exam link with students."}</div>`}
+      ${results.length ? html`<div class="attempt-list">${results.map((attempt) => html`<div class="attempt-list-item"><button class="attempt-row" @click=${() => this.openAnswerSheet(attempt)}><span class="attempt-avatar">${attempt.student_name.slice(0, 1).toUpperCase()}</span><span class="attempt-person"><b>${attempt.student_name}</b><small>Roll ${attempt.roll_number}${attempt.email ? ` · ${attempt.email}` : ''}</small></span><span class="attempt-score">${attempt.score === null ? '—' : `${attempt.score} / ${exam.total_marks ?? exam.question_count}`}</span><span class="status-tag ${attempt.status}">${attempt.status.replace('_', ' ')}</span><span class="row-arrow">→</span></button><button class="button button-danger button-small" aria-label=${`Delete result sheet for ${attempt.student_name}, roll ${attempt.roll_number}`} @click=${() => this.deleteAttempt(attempt)}>Delete result sheet</button></div>`)}</div>` : html`<div class="empty-inline">${this.attempts.length ? "No results match your search. Try another name or roll number." : "No participants yet. Share the published exam link with students."}</div>`}
     </div>`;
   }
 
@@ -2208,11 +2324,11 @@ export class McqApp extends LitElement {
         const qType = answer.question_type || DEFAULT_QUESTION_TYPE;
         const answered = isAnswerProvided(answer, answer.selected_option, answer.answer_data);
         const partial = graded && !answer.is_correct && answered && Number(answer.marks_awarded) > 0;
-        return html`<article class="sheet-question ${graded ? answer.is_correct ? 'is-correct' : partial ? 'is-partial' : answered ? 'is-wrong' : 'is-pending' : 'is-pending'}"><div class="sheet-q-head"><span>QUESTION ${String(index + 1).padStart(2, '0')} · ${formatQuestionTypeBadge(answer).shortLabel.toUpperCase()}</span><span class=${graded ? answer.is_correct ? 'correct-text' : partial ? 'partial-text' : answered ? 'wrong-text' : 'pending-text' : 'pending-text'}>${graded ? answer.is_correct ? '✓ Correct' : partial ? 'Partial credit' : answered ? '× Incorrect' : 'Not answered' : 'Not graded'}</span></div><h4>${unsafeHTML(renderQuestionText(answer.question_text))}</h4>
+        return html`<article class="sheet-question ${graded ? answer.is_correct ? 'is-correct' : partial ? 'is-partial' : answered ? 'is-wrong' : 'is-pending' : 'is-pending'}"><div class="sheet-q-head"><span>QUESTION ${String(index + 1).padStart(2, '0')} · ${formatQuestionTypeBadge(answer).shortLabel.toUpperCase()}</span><span class=${graded ? answer.is_correct ? 'correct-text' : partial ? 'partial-text' : answered ? 'wrong-text' : 'pending-text' : 'pending-text'}>${graded ? answer.is_correct ? '✓ Correct' : partial ? 'Partial credit' : answered ? '× Incorrect' : 'Not answered' : 'Not graded'}</span></div>${this.renderStimulus(answer.stimulus || answer.question_config?.stimulus, `teacher-review-stimulus-${answer.question_id}`)}<h4>${unsafeHTML(renderQuestionText(answer.question_text))}</h4>${this.renderQuestionMedia(answer.media, { key: `teacher-review-media-${answer.question_id}`, label: answer.question_text || 'Question media' })}
           ${qType === QUESTION_TYPES.MCQ_SINGLE
-            ? html`<div class="sheet-answers">${letters.map((letter) => html`<div class="sheet-option ${letter === answer.correct_option ? 'right-option' : ''} ${graded && letter === answer.selected_option && !answer.is_correct ? 'chosen-wrong' : ''}"><span>${letter}</span><span>${answer[optionKeys[letter]]}</span>${letter === answer.selected_option ? html`<small class="student-label">STUDENT</small>` : ''}${letter === answer.correct_option ? html`<small>CORRECT</small>` : ''}</div>`)}</div>`
+            ? html`<div class="sheet-answers">${letters.map((letter) => html`<div class="sheet-option ${letter === answer.correct_option ? 'right-option' : ''} ${graded && letter === answer.selected_option && !answer.is_correct ? 'chosen-wrong' : ''}"><span>${letter}</span><span>${unsafeHTML(sanitizeRichText(answer[optionKeys[letter]]))}</span>${letter === answer.selected_option ? html`<small class="student-label">STUDENT</small>` : ''}${letter === answer.correct_option ? html`<small>CORRECT</small>` : ''}</div>`)}</div>`
             : html`<div class="sheet-non-mcq-review"><p><b>Student response:</b> ${formatStudentAnswerSummary(answer)}</p><p><b>Correct answer:</b> ${formatCorrectAnswerSummary(answer)}</p></div>`}
-          ${answer.explanation ? html`<p class="answer-explanation"><b>Explanation</b> ${answer.explanation}</p>` : ''}
+          ${answer.explanation ? html`<p class="answer-explanation"><b>Explanation</b> ${unsafeHTML(sanitizeRichText(answer.explanation))}</p>` : ''}
           <div class="marks-row"><span>Student selected <b>${qType === QUESTION_TYPES.MCQ_SINGLE ? (answer.selected_option ? `Option ${answer.selected_option}` : 'No answer') : (answered ? formatStudentAnswerSummary(answer) : 'No answer')}</b></span><span>${graded ? `${answer.marks_awarded ?? 0} / ${answer.marks} mark${answer.marks === 1 ? '' : 's'}` : 'Pending submission'}</span></div></article>`;
       })}</div>
       <button class="button button-outline button-full back-sheet-button" @click=${() => { this.answerSheet = null; this.requestUpdate(); }}>← Back to participants</button>
@@ -2268,6 +2384,142 @@ export class McqApp extends LitElement {
         </div>
       </section>
     </div>`;
+  }
+
+  canReorderQuestion(question) {
+    return this.page === 'exam' && !this.busy && !this.pendingAnswerSaves && !this.submitConfirmOpen && !this.questionMoving
+      && this.attempt?.status === 'in_progress'
+      && this.attempt?.questions?.[this.currentQuestion]?.id === question.id;
+  }
+
+  moveOrderingAnswer(question, order, fromIndex, toIndex) {
+    if (!this.canReorderQuestion(question) || this.orderingPointerDrag
+      || !Number.isInteger(fromIndex) || !Number.isInteger(toIndex)
+      || fromIndex < 0 || toIndex < 0 || fromIndex >= order.length || toIndex >= order.length || fromIndex === toIndex) return false;
+    const ids = (question.question_config?.items || []).map((item) => item.id);
+    if (order.length !== ids.length || new Set(order).size !== ids.length || !order.every((id) => ids.includes(id))) return false;
+    const nextOrder = [...order];
+    const [item] = nextOrder.splice(fromIndex, 1);
+    nextOrder.splice(toIndex, 0, item);
+    this.orderingDragNotice = `Item moved to position ${toIndex + 1} of ${order.length}.`;
+    this.saveStructuredAnswer(question, { order: nextOrder });
+    return true;
+  }
+
+  startOrderingPointerDrag(event, question, order, fromIndex) {
+    // Mouse users keep native HTML5 dragging. Touch and pen start only on the handle.
+    if (!['touch', 'pen'].includes(event.pointerType) || event.isPrimary === false || event.button !== 0
+      || this.orderingPointerDrag || !this.canReorderQuestion(question) || !Array.isArray(order) || !Number.isInteger(fromIndex)) return false;
+    const handle = event.currentTarget;
+    const list = handle?.closest?.('.student-ordering-list');
+    const document = handle?.ownerDocument;
+    if (handle?.disabled || !list || !document?.addEventListener || fromIndex < 0 || fromIndex >= order.length) return false;
+    event.preventDefault();
+    const drag = {
+      pointerId: event.pointerId, question, attemptId: this.attempt.id, order: [...order], fromIndex, toIndex: fromIndex,
+      startX: event.clientX, startY: event.clientY, moved: false, inside: true, handle, list, document,
+      move: (next) => this.updateOrderingPointerDrag(next),
+      finish: (next) => this.finishOrderingPointerDrag(next),
+      cancel: (next) => this.cancelOrderingPointerDrag(next),
+      keydown: (next) => { if (next.key === 'Escape') { next.preventDefault(); this.cancelOrderingPointerDrag(); } },
+      visibility: () => { if (document.hidden) this.cancelOrderingPointerDrag(); },
+    };
+    this.orderingNativeDrag = null;
+    this.orderingPointerDrag = drag;
+    this.orderingDragNotice = 'Drag to another position, then release. Escape cancels.';
+    document.addEventListener('pointermove', drag.move, { passive: false });
+    document.addEventListener('pointerup', drag.finish);
+    document.addEventListener('pointercancel', drag.cancel);
+    document.addEventListener('keydown', drag.keydown);
+    document.addEventListener('visibilitychange', drag.visibility);
+    document.defaultView?.addEventListener('blur', drag.cancel);
+    try { handle.setPointerCapture?.(event.pointerId); } catch { /* Document listeners also track browsers without capture. */ }
+    this.requestUpdate();
+    return true;
+  }
+
+  updateOrderingPointerDrag(event) {
+    const drag = this.orderingPointerDrag;
+    if (!drag || event.pointerId !== drag.pointerId) return false;
+    if (!this.canReorderQuestion(drag.question) || this.attempt.id !== drag.attemptId || drag.handle.isConnected === false) {
+      this.cancelOrderingPointerDrag();
+      return false;
+    }
+    event.preventDefault?.();
+    if (!Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return false;
+    if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 6) return false;
+    const bounds = drag.list.getBoundingClientRect();
+    const inside = event.clientX >= bounds.left && event.clientX <= bounds.right
+      && event.clientY >= bounds.top && event.clientY <= bounds.bottom;
+    let target = drag.fromIndex;
+    if (inside) {
+      let distance = Infinity;
+      Array.from(drag.list.querySelectorAll('.student-ordering-row')).forEach((row, index) => {
+        const box = row.getBoundingClientRect();
+        const nextDistance = Math.abs(event.clientY - (box.top + box.bottom) / 2);
+        if (nextDistance < distance) { target = index; distance = nextDistance; }
+      });
+    }
+    const changed = !drag.moved || drag.inside !== inside || drag.toIndex !== target;
+    drag.moved = true;
+    drag.inside = inside;
+    drag.toIndex = target;
+    if (changed) {
+      this.orderingDragNotice = inside ? `Release to move to position ${target + 1} of ${drag.order.length}.` : 'Outside the list. Release to cancel.';
+      this.requestUpdate();
+    }
+    return true;
+  }
+
+  finishOrderingPointerDrag(event) {
+    const drag = this.orderingPointerDrag;
+    if (!drag || event.pointerId !== drag.pointerId) return false;
+    this.updateOrderingPointerDrag(event);
+    if (this.orderingPointerDrag !== drag) return false;
+    const commit = drag.moved && drag.inside && this.canReorderQuestion(drag.question)
+      && this.attempt.id === drag.attemptId && drag.toIndex !== drag.fromIndex;
+    this.cancelOrderingPointerDrag(null, { announce: false });
+    if (commit) return this.moveOrderingAnswer(drag.question, drag.order, drag.fromIndex, drag.toIndex);
+    this.orderingDragNotice = 'Order unchanged.';
+    this.requestUpdate();
+    return false;
+  }
+
+  cancelOrderingPointerDrag(event = null, { announce = true } = {}) {
+    const drag = this.orderingPointerDrag;
+    if (!drag || (event?.pointerId !== undefined && event.pointerId !== drag.pointerId)) return false;
+    this.orderingPointerDrag = null;
+    drag.document.removeEventListener('pointermove', drag.move);
+    drag.document.removeEventListener('pointerup', drag.finish);
+    drag.document.removeEventListener('pointercancel', drag.cancel);
+    drag.document.removeEventListener('keydown', drag.keydown);
+    drag.document.removeEventListener('visibilitychange', drag.visibility);
+    drag.document.defaultView?.removeEventListener('blur', drag.cancel);
+    try { if (drag.handle.hasPointerCapture?.(drag.pointerId)) drag.handle.releasePointerCapture(drag.pointerId); } catch { /* The browser may have canceled capture already. */ }
+    if (announce) this.orderingDragNotice = 'Reordering canceled. Order unchanged.';
+    this.requestUpdate();
+    return true;
+  }
+
+  initialOrderingIds(question) {
+    const ids = (question.question_config?.items || []).map((item) => item.id);
+    const validOrder = (order) => Array.isArray(order) && order.length === ids.length && new Set(order).size === ids.length && order.every((id) => ids.includes(id));
+    const attemptId = this.attempt?.id;
+    if (this.orderingAttemptId !== attemptId) {
+      this.orderingAttemptId = attemptId;
+      this.orderingInitialState = {};
+      try {
+        const saved = typeof sessionStorage !== 'undefined' ? JSON.parse(sessionStorage.getItem('mcq-ordering-initial') || 'null') : null;
+        if (attemptId && saved?.attemptId === attemptId && saved.orders && typeof saved.orders === 'object') this.orderingInitialState = saved.orders;
+      } catch { /* Storage can be disabled or contain stale data. */ }
+    }
+    if (!validOrder(this.orderingInitialState[question.id])) {
+      this.orderingInitialState[question.id] = shuffleOrderingIds(ids);
+      try {
+        if (attemptId && typeof sessionStorage !== 'undefined') sessionStorage.setItem('mcq-ordering-initial', JSON.stringify({ attemptId, orders: this.orderingInitialState }));
+      } catch { /* Navigation remains stable in memory when storage is unavailable. */ }
+    }
+    return this.orderingInitialState[question.id];
   }
 
   renderStudentQuestionInput(question) {
@@ -2414,12 +2666,12 @@ export class McqApp extends LitElement {
         <div class="student-matching-list">
           ${prompts.map((p) => html`<div class="student-matching-row">
             <span class="prompt-label"><strong>${p.id}.</strong> ${unsafeHTML(sanitizeRichText(p.text))}</span>
-            <select aria-label="Match for ${p.text}" .value=${currentPairs[p.id] || ''} @change=${(event) => {
+            <select aria-label="Match for ${plainRichText(p.text)}" .value=${currentPairs[p.id] || ''} @change=${(event) => {
               const nextPairs = { ...currentPairs, [p.id]: event.target.value };
               this.saveStructuredAnswer(question, { pairs: nextPairs });
             }}>
               <option value="">Choose match…</option>
-              ${choices.map((c) => html`<option value=${c.id} ?selected=${currentPairs[p.id] === c.id}>${c.id}. ${c.text}</option>`)}
+              ${choices.map((c) => html`<option value=${c.id} ?selected=${currentPairs[p.id] === c.id}>${c.id}. ${plainRichText(c.text)}</option>`)}
             </select>
           </div>`)}
         </div>
@@ -2428,56 +2680,58 @@ export class McqApp extends LitElement {
 
     if (qType === QUESTION_TYPES.ORDERING) {
       const items = Array.isArray(qConfig.items) ? qConfig.items : [];
-      const itemMap = new Map(items.map((i) => [i.id, i]));
-      if (!this.orderingInitialState) this.orderingInitialState = {};
-      if (!this.orderingInitialState[question.id]) {
-        const rawIds = items.map((i) => i.id);
-        this.orderingInitialState[question.id] = rawIds.length >= 2 ? [...rawIds].reverse() : rawIds;
-      }
-      const currentOrder = Array.isArray(currentData.order) && currentData.order.length === items.length
-        ? currentData.order
-        : this.orderingInitialState[question.id];
-
+      const itemMap = new Map(items.map((item) => [item.id, item]));
+      const initialOrder = this.initialOrderingIds(question);
+      const currentOrder = Array.isArray(currentData.order) && currentData.order.length === items.length && new Set(currentData.order).size === items.length && currentData.order.every((id) => itemMap.has(id))
+        ? currentData.order : initialOrder;
+      const disabled = !this.canReorderQuestion(question);
+      const drag = this.orderingPointerDrag?.question.id === question.id ? this.orderingPointerDrag : null;
+      const statusId = `ordering-status-${question.id}`;
       return html`
-        <p class="question-hint">Drag and drop or use the arrows to arrange the items into the correct order</p>
+        <p class="question-hint">Drag an item's handle with touch or pen, drag a row with a mouse, or use the Up/Down arrows to arrange the items.</p>
+        <p class="ordering-drag-status" id=${statusId} role="status" aria-live="polite">${this.orderingDragNotice}</p>
         <div class="student-ordering-list" role="list">
-          ${currentOrder.map((id, idx) => {
+          ${currentOrder.map((id, index) => {
             const item = itemMap.get(id) || { id, text: '' };
-            return html`<div class="student-ordering-row"
-              role="listitem"
-              draggable="true"
-              @dragstart=${(e) => {
-                e.dataTransfer.setData('text/plain', String(idx));
-                e.dataTransfer.effectAllowed = 'move';
+            const dragging = drag?.fromIndex === index;
+            const target = drag?.moved && drag.inside && drag.toIndex === index && drag.fromIndex !== index;
+            return html`<div class="student-ordering-row ${dragging ? 'ordering-drag-source' : ''} ${target ? 'ordering-drop-target' : ''}"
+              role="listitem" data-ordering-id=${id} data-ordering-index=${index} draggable=${String(!disabled && !drag)}
+              @dragstart=${(event) => {
+                if (disabled || drag || !this.canReorderQuestion(question) || !event.dataTransfer) { event.preventDefault(); return; }
+                this.orderingNativeDrag = { questionId: question.id, attemptId: this.attempt.id, fromIndex: index, order: [...currentOrder] };
+                event.dataTransfer.setData('text/plain', String(index));
+                event.dataTransfer.effectAllowed = 'move';
               }}
-              @dragover=${(e) => {
-                e.preventDefault();
-                e.dataTransfer.dropEffect = 'move';
+              @dragend=${() => { this.orderingNativeDrag = null; }}
+              @dragover=${(event) => {
+                if (this.orderingNativeDrag?.questionId !== question.id || !this.canReorderQuestion(question)) return;
+                event.preventDefault();
+                if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
               }}
-              @drop=${(e) => {
-                e.preventDefault();
-                const fromIdx = Number(e.dataTransfer.getData('text/plain'));
-                if (Number.isInteger(fromIdx) && fromIdx !== idx && fromIdx >= 0 && fromIdx < currentOrder.length) {
-                  const nextOrder = [...currentOrder];
-                  const [moved] = nextOrder.splice(fromIdx, 1);
-                  nextOrder.splice(idx, 0, moved);
-                  this.saveStructuredAnswer(question, { order: nextOrder });
-                }
+              @drop=${(event) => {
+                event.preventDefault();
+                const source = this.orderingNativeDrag;
+                this.orderingNativeDrag = null;
+                if (source?.questionId === question.id && source.attemptId === this.attempt?.id) this.moveOrderingAnswer(question, source.order, source.fromIndex, index);
               }}>
-              <span class="drag-handle" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
-              <span class="option-letter">${idx + 1}</span>
+              <button type="button" class="drag-handle" data-ordering-drag-handle
+                title="Drag to reorder" aria-label=${`Drag ${plainRichText(item.text)} to reorder, or use Up and Down controls`}
+                aria-describedby=${statusId} aria-pressed=${String(Boolean(dragging))} ?disabled=${disabled || Boolean(drag && !dragging)}
+                @pointerdown=${(event) => this.startOrderingPointerDrag(event, question, currentOrder, index)}
+                @lostpointercapture=${(event) => this.cancelOrderingPointerDrag(event)}
+                @keydown=${(event) => {
+                  if (event.key === 'Escape') this.cancelOrderingPointerDrag();
+                  else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+                    event.preventDefault();
+                    this.moveOrderingAnswer(question, currentOrder, index, index + (event.key === 'ArrowUp' ? -1 : 1));
+                  }
+                }}>⋮⋮</button>
+              <span class="option-letter">${index + 1}</span>
               <span class="option-text">${unsafeHTML(sanitizeRichText(item.text))}</span>
               <div class="order-move-controls">
-                <button type="button" class="icon-move-btn" aria-label="Move ${item.text} up" ?disabled=${idx === 0} @click=${() => {
-                  const nextOrder = [...currentOrder];
-                  [nextOrder[idx - 1], nextOrder[idx]] = [nextOrder[idx], nextOrder[idx - 1]];
-                  this.saveStructuredAnswer(question, { order: nextOrder });
-                }}>↑</button>
-                <button type="button" class="icon-move-btn" aria-label="Move ${item.text} down" ?disabled=${idx === currentOrder.length - 1} @click=${() => {
-                  const nextOrder = [...currentOrder];
-                  [nextOrder[idx + 1], nextOrder[idx]] = [nextOrder[idx], nextOrder[idx + 1]];
-                  this.saveStructuredAnswer(question, { order: nextOrder });
-                }}>↓</button>
+                <button type="button" class="icon-move-btn" aria-label="Move ${plainRichText(item.text)} up" ?disabled=${disabled || Boolean(drag) || index === 0} @click=${() => this.moveOrderingAnswer(question, currentOrder, index, index - 1)}>↑</button>
+                <button type="button" class="icon-move-btn" aria-label="Move ${plainRichText(item.text)} down" ?disabled=${disabled || Boolean(drag) || index === currentOrder.length - 1} @click=${() => this.moveOrderingAnswer(question, currentOrder, index, index + 1)}>↓</button>
               </div>
             </div>`;
           })}
@@ -2500,22 +2754,9 @@ export class McqApp extends LitElement {
       <div class="exam-player-top"><button class="brand" @click=${async () => { if (await this.confirmMessage('Leave this exam? You can return using this browser session.', { label: 'Leave exam' })) { this.page = 'home'; this.requestUpdate(); } }}><span class="brand-mark">${title.charAt(0).toUpperCase()}</span><span>${title.toLowerCase()}<span class="brand-dot">.</span><small>${subtitle.toUpperCase()}</small></span></button><div class="exam-live-meta"><span class="live-label"><span></span> IN PROGRESS</span><span class="timer-chip ${this.remainingSeconds < 300 ? 'timer-warning' : ''}"><span>◷</span>${htmlTime(this.remainingSeconds)}</span></div></div>
       <div class="exam-player-layout"><aside class="exam-sidebar"><div class="sidebar-exam-info"><span class="eyebrow muted">EXAMINATION</span><h2>${this.attempt.exam_title}</h2><p>${this.attempt.student_name}<span> · Roll ${this.attempt.roll_number}</span></p></div><div class="sidebar-progress"><div><span>YOUR PROGRESS</span><b>${answered} <small>/ ${total}</small></b></div><div class="progress-track"><span style="width:${progress}%"></span></div><p>${answered === total ? 'You have answered every question.' : `${total - answered} questions remaining`}</p></div><div class="question-nav-label"><span>QUESTION NAVIGATOR</span><span>${answered} answered</span></div><div class="question-nav">${this.attempt.questions.map((item, index) => html`<button class="question-nav-item ${index === this.currentQuestion ? 'current' : ''} ${this.answers[item.id] ? 'answered' : ''}" @click=${() => { this.goToQuestion(index); }} aria-label=${`Question ${index + 1}${this.answers[item.id] ? ', answered' : ''}`}><span>${String(index + 1).padStart(2, '0')}</span>${this.answers[item.id] ? html`<span class="nav-check">✓</span>` : ''}</button>`)}</div><div class="nav-legend"><span><i class="legend-current"></i>Current</span><span><i class="legend-done"></i>Answered</span><span><i class="legend-empty"></i>Unanswered</span></div><div class="autosave-note"><span>✓</span> Answers save as you go</div></aside>
         <section class="question-stage"><div class="question-stage-top"><span>QUESTION <b>${String(this.currentQuestion + 1).padStart(2, '0')}</b> <i>OF</i> ${String(total).padStart(2, '0')}</span><span class="mark-chip">${question.marks} MARK</span></div><div class="question-progress"><span style="width:${((this.currentQuestion + 1) / total) * 100}%"></span></div><div class="question-content">
-          ${question.stimulus ? html`
-            <div class="stimulus-panel">
-              <span class="eyebrow stimulus-eyebrow">READING / REFERENCE STIMULUS</span>
-              ${question.stimulus.title ? html`<h3 class="stimulus-title">${question.stimulus.title}</h3>` : ''}
-              ${question.stimulus.text ? html`<div class="stimulus-text">${unsafeHTML(sanitizeRichText(question.stimulus.text))}</div>` : ''}
-              ${question.stimulus.media?.url ? html`
-                <figure class="question-media-box stimulus-media">
-                  ${question.stimulus.media.type === 'audio'
-                    ? html`<audio controls preload="metadata" src=${question.stimulus.media.url}></audio>`
-                    : html`<img src=${question.stimulus.media.url} alt=${question.stimulus.title || 'Stimulus media'} />`}
-                </figure>
-              ` : ''}
-            </div>
-          ` : ''}
+          ${this.renderStimulus(question.stimulus || question.question_config?.stimulus, `exam-stimulus-${question.id}`)}
           <div class="question-step">${String(this.currentQuestion + 1).padStart(2, '0')} <span>—</span> ${String(total).padStart(2, '0')}</div><h1>${unsafeHTML(renderQuestionText(question.question_text))}</h1>
-          ${question.media?.url ? html`<figure class="question-media-box">${question.media.type === 'audio' ? html`<audio controls preload="metadata" src=${question.media.url}></audio>` : html`<img src=${question.media.url} alt=${question.media.alt || question.question_text} />`}${question.media.caption ? html`<figcaption>${question.media.caption}</figcaption>` : ''}</figure>` : ''}
+          ${this.renderQuestionMedia(question.media, { key: `exam-question-${question.id}`, label: question.question_text || 'Question media' })}
           ${this.renderStudentQuestionInput(question)}
         </div><div class="question-actions"><button class="button button-outline" ?disabled=${this.currentQuestion === 0} @click=${() => { this.goToQuestion(this.currentQuestion - 1); }}>← <span>Previous</span></button><span class="save-state"><span class="save-dot"></span> ${this.pendingAnswerSaves ? 'Saving…' : 'Saved automatically'}</span>${this.currentQuestion < total - 1 ? html`<button class="button button-primary" @click=${() => { this.goToQuestion(this.currentQuestion + 1); }}>Next question <span>→</span></button>` : html`<button class="button button-primary" @click=${() => this.submitAttempt(false)} ?disabled=${this.busy}>Submit exam <span>→</span></button>`}</div><button class="submit-text" @click=${() => this.submitAttempt(false)}>Submit examination</button></section>
       </div><footer class="exam-player-footer"><span>${title} Examination Portal</span><span>Need a moment? Your answers are saved automatically.</span></footer>
@@ -2526,11 +2767,11 @@ export class McqApp extends LitElement {
     const result = this.attempt?.result || {};
     const reviewed = result.answers || [];
     return html`<main class="result-page"><div class="result-card"><div class="result-success-icon">✓</div><span class="eyebrow muted">EXAMINATION COMPLETE</span><h1>${this.attempt?.exam_title || 'Your examination'}</h1><p class="result-greeting">Well done, ${this.attempt?.student_name || 'student'}.</p><div class="result-message">Your exam has been submitted successfully.</div>
-      ${Object.hasOwn(result, 'score') ? html`<div class="student-score"><span>YOUR SCORE</span><strong>${result.score}<small> / ${this.attempt.questions.length}</small></strong><p>${result.status === 'auto_submitted' ? 'Submitted automatically when time expired' : 'Your examination has been submitted'}</p></div>` : ''}
+      ${Object.hasOwn(result, 'score') ? html`<div class="student-score"><span>YOUR SCORE</span><strong>${result.score}<small> / ${this.attempt.questions.reduce((sum, question) => sum + Number(question.marks ?? 1), 0)}</small></strong><p>${result.status === 'auto_submitted' ? 'Submitted automatically when time expired' : 'Your examination has been submitted'}</p></div>` : ''}
       ${reviewed.length ? html`<div class="student-review"><div class="review-heading"><h2>Answer review</h2><span>${reviewed.filter((answer) => answer.is_correct).length} of ${reviewed.length} correct</span></div>${reviewed.map((answer, index) => {
         const answered = isAnswerProvided(answer, answer.selected_option, answer.answer_data);
         const partial = !answer.is_correct && answered && Number(answer.marks_awarded) > 0;
-        return html`<article class="review-item ${answer.is_correct ? 'is-correct' : partial ? 'is-partial' : answered ? 'is-wrong' : 'is-pending'}"><div class="review-item-head"><span>QUESTION ${String(index + 1).padStart(2, '0')}</span><b>${answer.is_correct ? '✓ Correct' : partial ? 'Partial credit' : answered ? '× Incorrect' : 'Not answered'}</b></div><h3>${unsafeHTML(renderQuestionText(answer.question_text))}</h3><p>Your answer: <strong>${formatStudentAnswerSummary(answer)}</strong></p><p>Correct answer: <strong>${formatCorrectAnswerSummary(answer)}</strong></p>${answer.explanation ? html`<p class="answer-explanation"><b>Explanation</b> ${unsafeHTML(sanitizeRichText(answer.explanation))}</p>` : ''}<span class="review-mark">${answer.marks_awarded ?? 0} / ${answer.marks} mark</span></article>`;
+        return html`<article class="review-item ${answer.is_correct ? 'is-correct' : partial ? 'is-partial' : answered ? 'is-wrong' : 'is-pending'}"><div class="review-item-head"><span>QUESTION ${String(index + 1).padStart(2, '0')}</span><b>${answer.is_correct ? '✓ Correct' : partial ? 'Partial credit' : answered ? '× Incorrect' : 'Not answered'}</b></div>${this.renderStimulus(answer.stimulus || answer.question_config?.stimulus, `review-stimulus-${answer.question_id}`)}<h3>${unsafeHTML(renderQuestionText(answer.question_text))}</h3>${this.renderQuestionMedia(answer.media, { key: `review-media-${answer.question_id}`, label: answer.question_text || 'Question media' })}<p>Your answer: <strong>${formatStudentAnswerSummary(answer)}</strong></p><p>Correct answer: <strong>${formatCorrectAnswerSummary(answer)}</strong></p>${answer.explanation ? html`<p class="answer-explanation"><b>Explanation</b> ${unsafeHTML(sanitizeRichText(answer.explanation))}</p>` : ''}<span class="review-mark">${answer.marks_awarded ?? 0} / ${answer.marks} mark</span></article>`;
       })}</div>` : ''}
       ${(result.allow_pdf_download || this.attempt?.allow_pdf_download) && reviewed.length ? html`<div class="result-download-section"><button class="button button-outline button-full download-pdf-btn" @click=${() => this.downloadResultPdf()}>↓ Download result as PDF</button></div>` : ''}
       <button class="button button-primary button-full" @click=${this.newAttempt}>Return to examinations <span>→</span></button>
