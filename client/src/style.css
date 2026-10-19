@@ -1500,3 +1500,24 @@ body.no-animations {
 }
 
 
+
+/* Media and shared stimuli remain usable in dialogs, exam cards and narrow screens. */
+.stimulus-editor-grid { display: grid; gap: 12px; }
+.stimulus-reference-note { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 12px 0; padding: 12px; border-radius: 8px; background: #eef2ff; color: #3730a3; font-size: 13px; }
+.stimulus-reference-note .button { flex-shrink: 0; }
+.stimulus-fieldset input[readonly], .stimulus-fieldset textarea[readonly] { background: #f1f5f9; color: #475569; }
+.stimulus-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.media-pending-notice { padding: 12px; margin: 8px 0; border: 1px solid #fcd34d; border-radius: 8px; background: #fffbeb; color: #92400e; font-size: 13px; }
+.media-load-status { margin: 8px 0 0; color: #64748b; font-size: 12px; }
+.media-load-error { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 10px 0 0; color: #b91c1c; font-size: 13px; }
+.question-media-box { min-width: 0; overflow-wrap: anywhere; }
+.question-media-box audio { display: block; width: 100%; min-width: 0; }
+.question-media-box img { width: auto; height: auto; max-height: 480px; }
+.quick-attach-modal { max-height: 90vh; overflow-y: auto; }
+.student-ordering-row .icon-move-btn { min-width: 40px; min-height: 40px; }
+@media (max-width: 600px) {
+  .stimulus-reference-note { align-items: stretch; flex-direction: column; }
+  .quick-attach-modal .field-row { display: grid; grid-template-columns: 1fr; }
+  .question-media-box { padding: 8px; }
+  .question-media-box img { max-height: 320px; }
+}

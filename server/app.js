@@ -10,6 +10,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { db, databasePath } from './db.js';
 import { shortenWithIsgd } from './isgd.js';
+import { MediaError, MAX_AUDIO_BYTES, inspectMediaBytes, mediaHeaders, parseMediaRange, mediaPublishProblem, questionMediaItems, backupMediaManifest } from './media-storage.js';
+import { localMediaStore } from './local-media-storage.js';
+import { listReusableStimuli } from './stimuli.js';
 import {
   normalizeQuestion,
   hydrateQuestionRow,
@@ -19,6 +22,7 @@ import {
   validateQuestionMedia,
   parseQuestionPaste,
 } from './question-types.js';
+import { createQuestionWorkbook, parseQuestionWorkbook } from './question-import.js';
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
@@ -28,11 +32,8 @@ const defaultUploadsDir = process.env.DB_PATH
   ? path.join(path.dirname(path.resolve(process.env.DB_PATH)), 'uploads')
   : path.join(root, 'data', 'uploads');
 const uploadsDir = path.resolve(process.env.UPLOADS_DIR || defaultUploadsDir);
-try {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-} catch (err) {
-  console.warn(`Could not create uploads directory at ${uploadsDir}:`, err.message);
-}
+const mediaStore = localMediaStore(uploadsDir);
+const mediaUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_AUDIO_BYTES, files: 1, fields: 4, fieldSize: 4096, parts: 5 } }).single('file');
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 12 * 1024 * 1024, files: 1 } });
 const adminUsername = process.env.ADMIN_USERNAME || 'admin';
 const derivePassword = promisify(crypto.pbkdf2);
@@ -40,7 +41,6 @@ const passwordIterations = 210000;
 
 app.disable('x-powered-by');
 app.use(express.json({ limit: '8mb' }));
-app.use('/uploads', express.static(uploadsDir));
 app.use(session({
   name: 'mcq.sid',
   secret: process.env.SESSION_SECRET || 'local-demo-secret-change-before-deploying',
@@ -241,7 +241,7 @@ app.put('/api/admin/settings', requireAdmin, (req, res) => {
 
 app.get('/api/exams', (_req, res) => {
   const exams = db.prepare(`SELECT e.id, e.title, e.description, e.duration_minutes, e.created_at,
-      COUNT(eq.id) AS question_count
+      COUNT(eq.id) AS question_count, COALESCE(SUM(eq.marks),0) AS total_marks
     FROM exams e LEFT JOIN exam_questions eq ON eq.exam_id = e.id
     WHERE e.status = 'published' GROUP BY e.id ORDER BY e.created_at DESC, e.id DESC`).all();
   res.json(exams);
@@ -251,7 +251,7 @@ app.get('/api/exams/:id', (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isSafeInteger(id) || id < 1) return apiError(res, 404, 'This examination is not available.');
   const exam = db.prepare(`SELECT e.id, e.title, e.description, e.duration_minutes, e.subject, e.negative_mark,
-      e.created_at, COUNT(eq.id) AS question_count
+      e.created_at, COUNT(eq.id) AS question_count, COALESCE(SUM(eq.marks),0) AS total_marks
     FROM exams e LEFT JOIN exam_questions eq ON eq.exam_id=e.id
     WHERE e.id=? AND e.status='published' GROUP BY e.id`).get(id);
   if (!exam) return apiError(res, 404, 'This examination is not available.');
@@ -263,13 +263,17 @@ app.get('/api/admin/backup', requireAdmin, (_req, res) => {
   const data = db.transaction(() => Object.fromEntries(tables.map((table) => [table, db.prepare(`SELECT * FROM ${table}`).all()])))();
   res.set('Cache-Control', 'no-store');
   res.attachment(`mcq-backup-${new Date().toISOString().slice(0, 10)}.json`);
-  res.json({ format: 'mcq-database-backup', version: 1, created_at: new Date().toISOString(), tables: data });
+  res.json({ format: 'mcq-database-backup', version: 1, created_at: new Date().toISOString(), tables: data, media: backupMediaManifest(data.questions, 'filesystem') });
 });
 
 app.get('/api/admin/questions', requireAdmin, (_req, res) => {
   const questions = db.prepare(`SELECT q.*, EXISTS(SELECT 1 FROM exam_questions eq WHERE eq.question_id = q.id) AS locked
     FROM questions q WHERE q.archived=0 ORDER BY q.id DESC`).all().map((row) => hydrateQuestionRow(row));
   res.json(questions);
+});
+
+app.get('/api/admin/stimuli', requireAdmin, (_req, res) => {
+  res.json(listReusableStimuli(db.prepare('SELECT * FROM questions WHERE archived=0 ORDER BY id DESC').all()));
 });
 
 app.post('/api/admin/questions', requireAdmin, (req, res) => {
@@ -279,36 +283,43 @@ app.post('/api/admin/questions', requireAdmin, (req, res) => {
   res.status(201).json(hydrateQuestionRow(questionById.get(result.lastInsertRowid)));
 });
 
-app.post('/api/admin/media/upload', requireAdmin, upload.single('file'), (req, res) => {
-  if (!req.file) return apiError(res, 400, 'Choose a file to upload.');
-  const mime = String(req.file.mimetype || '').toLowerCase();
-  const isImage = mime.startsWith('image/');
-  const isAudio = mime.startsWith('audio/');
-  if (!isImage && !isAudio) {
-    return apiError(res, 400, 'Only image and audio file uploads are supported.');
+// Media URLs are unguessable read capabilities, not admin endpoints. Never serve
+// the upload directory as static files: legacy uploads also receive byte checks.
+function serveMedia(req, res, legacy = false) {
+  try {
+    const filename = req.params.filename;
+    const stored = mediaStore.get(filename, { legacy });
+    if (!stored) return apiError(res, 404, 'Media not found.');
+    res.set(mediaHeaders(stored.mime, filename));
+    let range;
+    try { range = parseMediaRange(req.get('Range'), stored.size); }
+    catch (error) { res.set('Content-Range', `bytes */${stored.size}`); throw error; }
+    const bytes = range ? stored.bytes.subarray(range.offset, range.offset + range.length) : stored.bytes;
+    if (range) res.status(206).set('Content-Range', `bytes ${range.offset}-${range.offset + range.length - 1}/${stored.size}`);
+    return res.set('Content-Length', String(bytes.length)).send(bytes);
+  } catch (error) {
+    if (error instanceof MediaError) return apiError(res, error.status, error.message);
+    console.error('Media read failed:', error.message);
+    return apiError(res, 503, 'Media is temporarily unavailable.');
   }
-  if (mime.includes('video')) {
-    return apiError(res, 400, 'Video uploads are not supported.');
-  }
-  const maxImageSize = 5 * 1024 * 1024;
-  const maxAudioSize = 10 * 1024 * 1024;
-  if (isImage && req.file.size > maxImageSize) {
-    return apiError(res, 400, 'Image file size must be 5MB or less.');
-  }
-  if (isAudio && req.file.size > maxAudioSize) {
-    return apiError(res, 400, 'Audio file size must be 10MB or less.');
-  }
-  const ext = path.extname(req.file.originalname) || (isImage ? '.png' : '.mp3');
-  const filename = `${Date.now()}-${crypto.randomBytes(6).toString('hex')}${ext}`;
-  const targetPath = path.join(uploadsDir, filename);
-  fs.writeFileSync(targetPath, req.file.buffer);
-  const fileUrl = `/uploads/${filename}`;
-  res.json({
-    url: fileUrl,
-    type: isImage ? 'image' : 'audio',
-    filename,
-    size: req.file.size,
-    mime,
+}
+app.get('/api/media/:filename', (req, res) => serveMedia(req, res));
+app.get('/uploads/:filename', (req, res) => serveMedia(req, res, true));
+app.use('/uploads', (_req, res) => apiError(res, 404, 'Media not found.'));
+
+app.post('/api/admin/media/upload', requireAdmin, (req, res) => {
+  mediaUpload(req, res, (uploadError) => {
+    if (uploadError) return apiError(res, uploadError.code === 'LIMIT_FILE_SIZE' ? 413 : 400,
+      uploadError.code === 'LIMIT_FILE_SIZE' ? 'Media upload is too large (10MB maximum).' : 'Choose exactly one image or audio file.');
+    if (!req.file) return apiError(res, 400, 'Choose a file to upload.');
+    try {
+      const info = inspectMediaBytes(req.file.buffer, req.file.mimetype);
+      return res.json(mediaStore.put(req.file.buffer, info));
+    } catch (error) {
+      if (error instanceof MediaError) return apiError(res, error.status, error.message);
+      console.error('Media upload failed:', error.message);
+      return apiError(res, 503, 'Media could not be stored. Please try again.');
+    }
   });
 });
 
@@ -316,11 +327,40 @@ app.post('/api/admin/questions/:id/media', requireAdmin, (req, res) => {
   const id = Number(req.params.id);
   const found = questionById.get(id);
   if (!found) return apiError(res, 404, 'Question not found.');
-  const { media, errors } = validateQuestionMedia(req.body?.media || req.body);
+  const rawMedia = Object.hasOwn(req.body || {}, 'media') ? req.body.media : req.body;
+  const { media, errors } = validateQuestionMedia(rawMedia);
   if (errors.length) return apiError(res, 400, 'Invalid media payload.', errors);
-  db.prepare('UPDATE questions SET media=? WHERE id=?').run(media ? JSON.stringify(media) : null, id);
-  res.json(hydrateQuestionRow(questionById.get(id)));
+  const serialized = media ? JSON.stringify(media) : null;
+  if (lockedQuestion.get(id)) {
+    const replacement = db.transaction(() => {
+      const result = questionInsert.run({ ...found, media: serialized });
+      db.prepare('UPDATE questions SET archived=1 WHERE id=?').run(id);
+      return hydrateQuestionRow(questionById.get(result.lastInsertRowid));
+    })();
+    return res.json(replacement);
+  }
+  db.prepare('UPDATE questions SET media=? WHERE id=?').run(serialized, id);
+  return res.json(hydrateQuestionRow(questionById.get(id)));
 });
+
+function publishMediaProblem(questions) {
+  for (const question of questions) {
+    const problem = mediaPublishProblem(question);
+    if (problem) return problem;
+    for (const { value } of questionMediaItems(question)) {
+      const managed = value.url.startsWith('/api/media/');
+      const legacy = value.url.startsWith('/uploads/');
+      if (managed || legacy) {
+        let stored;
+        try { stored = mediaStore.get(value.url.slice(managed ? '/api/media/'.length : '/uploads/'.length), { legacy }); }
+        catch { return `Question #${question.id} has media that is temporarily unavailable. Try publishing again later.`; }
+        if (!stored) return `Question #${question.id} has a missing or unsafe uploaded media file.`;
+        if (stored.type !== value.type) return `Question #${question.id} has an attachment type that does not match its uploaded file.`;
+      }
+    }
+  }
+  return null;
+}
 
 app.post('/api/admin/questions/bulk', requireAdmin, (req, res) => {
   const subject = String(req.body?.subject ?? '').trim();
@@ -358,154 +398,11 @@ app.delete('/api/admin/questions/:id', requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
-const templateHeaders = [
-  'Question',
-  'Question Type',
-  'Option A',
-  'Option B',
-  'Option C',
-  'Option D',
-  'Correct Answer',
-  'Category',
-  'Difficulty',
-  'Explanation',
-  'Question Config',
-  'Answer Key',
-  'Media',
-];
-const optionalImportHeaders = ['Question Config', 'Answer Key', 'Media'];
-
-const templateSampleRows = [
-  [
-    'What is the capital of Bangladesh?',
-    'mcq_single',
-    'Dhaka',
-    'Chittagong',
-    'Sylhet',
-    'Rajshahi',
-    'A',
-    'General Knowledge',
-    'Easy',
-    'Dhaka has been the capital since 1971.',
-    '',
-    '',
-    '',
-  ],
-  [
-    'Which of the following numbers are prime?',
-    'mcq_multi',
-    '2',
-    '3',
-    '4',
-    '6',
-    'A, B',
-    'Mathematics',
-    'Medium',
-    '2 and 3 are prime numbers.',
-    '{"options":[{"id":"A","text":"2"},{"id":"B","text":"3"},{"id":"C","text":"4"},{"id":"D","text":"6"}]}',
-    '{"correct_options":["A","B"]}',
-    '',
-  ],
-  [
-    'The Earth revolves around the Sun.',
-    'true_false',
-    'True',
-    'False',
-    '',
-    '',
-    'True',
-    'General Science',
-    'Easy',
-    'The Earth orbits the Sun in approximately 365.25 days.',
-    '',
-    '',
-    '',
-  ],
-  [
-    'The chemical symbol for water is [blank].',
-    'fill_blank',
-    '',
-    '',
-    '',
-    '',
-    'H2O',
-    'Chemistry',
-    'Easy',
-    'Water consists of 2 hydrogen and 1 oxygen atom.',
-    '{"blanks":[{"id":"B1","label":"Blank 1"}]}',
-    '{"blanks":{"B1":["H2O","h2o"]}}',
-    '',
-  ],
-  [
-    'What is the powerhouse of the cell?',
-    'short_answer',
-    '',
-    '',
-    '',
-    '',
-    'Mitochondria',
-    'Biology',
-    'Medium',
-    'Mitochondria generate ATP energy for cellular processes.',
-    '',
-    '',
-    '',
-  ],
-  [
-    'What is standard gravity on Earth in m/s^2 (approx)?',
-    'numeric',
-    '',
-    '',
-    '',
-    '',
-    '9.8',
-    'Physics',
-    'Medium',
-    'Standard gravity is 9.80665 m/s^2.',
-    '{"tolerance":0.1,"unit":"m/s^2"}',
-    '{"value":9.8,"tolerance":0.1}',
-    '',
-  ],
-  [
-    'Match chemical formulas to common compound names.',
-    'matching',
-    '',
-    '',
-    '',
-    '',
-    '',
-    'Chemistry',
-    'Hard',
-    'H2O is water, NaCl is salt.',
-    '{"prompts":[{"id":"P1","text":"H2O"},{"id":"P2","text":"NaCl"}],"choices":[{"id":"C1","text":"Salt"},{"id":"C2","text":"Water"}]}',
-    '{"pairs":{"P1":"C2","P2":"C1"}}',
-    '',
-  ],
-  [
-    'Arrange butterfly lifecycle stages sequentially.',
-    'ordering',
-    '',
-    '',
-    '',
-    '',
-    '',
-    'Biology',
-    'Easy',
-    'Order: Egg -> Caterpillar -> Pupa -> Butterfly.',
-    '{"items":[{"id":"I1","text":"Egg"},{"id":"I2","text":"Caterpillar"},{"id":"I3","text":"Pupa"},{"id":"I4","text":"Butterfly"}]}',
-    '{"correct_order":["I1","I2","I3","I4"]}',
-    '',
-  ],
-];
-
 app.get('/api/admin/questions/template', requireAdmin, (_req, res) => {
-  const book = XLSX.utils.book_new();
-  const sheet = XLSX.utils.aoa_to_sheet([templateHeaders, ...templateSampleRows]);
-  sheet['!cols'] = templateHeaders.map((header) => ({ wch: Math.max(header.length + 2, 20) }));
-  XLSX.utils.book_append_sheet(book, sheet, 'Questions');
+  const book = createQuestionWorkbook(XLSX);
   const bytes = XLSX.write(book, { type: 'buffer', bookType: 'xlsx' });
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  res.setHeader('Content-Disposition', 'attachment; filename="mcq-question-template.xlsx"');
+  res.setHeader('Content-Disposition', 'attachment; filename="mcq-question-template-v2.xlsx"');
   res.send(bytes);
 });
 
@@ -519,49 +416,13 @@ app.get('/api/admin/questions/:id', requireAdmin, (req, res) => {
 
 app.post('/api/admin/questions/import', requireAdmin, upload.single('file'), (req, res) => {
   if (!req.file) return apiError(res, 400, 'Choose an Excel workbook to import.');
-  let rows;
+  let workbook;
   try {
-    const book = XLSX.read(req.file.buffer, { type: 'buffer' });
-    const first = book.Sheets[book.SheetNames[0]];
-    rows = XLSX.utils.sheet_to_json(first, { header: 1, defval: '', raw: false });
+    workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
   } catch {
     return apiError(res, 400, 'This file could not be read as an Excel workbook.');
   }
-  if (!rows?.length) return apiError(res, 400, 'The workbook is empty.');
-  const headers = rows[0].map((value) => String(value).trim().toLowerCase());
-  const headerIndexes = new Map(headers.map((header, index) => [header, index]));
-  const hasExtensibleHeaders = headerIndexes.has('question') && (
-    headerIndexes.has('question type') || headerIndexes.has('question config') || headerIndexes.has('answer key')
-  );
-  let missing = [];
-  if (hasExtensibleHeaders) {
-    if (!headerIndexes.has('question')) missing.push('Question');
-  } else {
-    const legacyRequiredHeaders = ['Question', 'Option A', 'Option B', 'Option C', 'Option D'];
-    missing = legacyRequiredHeaders.filter((header) => !headerIndexes.has(header.toLowerCase()));
-    if (!headerIndexes.has('correct answer') && !headerIndexes.has('correct option')) {
-      missing.push('Correct Answer');
-    }
-  }
-  if (missing.length) return apiError(res, 400, `Missing required columns: ${missing.join(', ')}.`);
-
-  const imported = [];
-  const errors = [];
-  const fallbackSubject = String(req.body?.subject ?? '').trim();
-  const allRecognizedHeaders = [...templateHeaders, ...optionalImportHeaders];
-  for (let index = 1; index < rows.length; index += 1) {
-    const cells = rows[index];
-    if (cells.every((cell) => String(cell ?? '').trim() === '')) continue;
-    const input = Object.fromEntries(allRecognizedHeaders.map((header) => {
-      const column = headerIndexes.get(header.toLowerCase());
-      return [header, column === undefined ? '' : cells[column] ?? ''];
-    }));
-    if (!String(input.Category ?? '').trim()) input.Category = fallbackSubject;
-    const { question, errors: rowErrors } = normalizedQuestion(input);
-    rowErrors.forEach((error) => errors.push(`Row ${index + 1}: ${error}`));
-    imported.push(question);
-  }
-  if (!imported.length && !errors.length) errors.push('No populated question rows were found.');
+  const { questions: imported, errors } = parseQuestionWorkbook(workbook, XLSX, req.body?.subject ?? '');
   if (errors.length) return apiError(res, 400, 'The workbook has validation errors. No questions were imported.', errors);
   db.transaction(() => imported.forEach((question) => questionInsert.run(question)))();
   res.json({ imported: imported.length });
@@ -569,6 +430,7 @@ app.post('/api/admin/questions/import', requireAdmin, upload.single('file'), (re
 
 app.get('/api/admin/exams', requireAdmin, (_req, res) => {
   const exams = db.prepare(`SELECT e.*, COUNT(DISTINCT eq.id) AS question_count,
+      (SELECT COALESCE(SUM(marks),0) FROM exam_questions WHERE exam_id=e.id) AS total_marks,
       COUNT(DISTINCT a.id) AS participant_count,
       COUNT(DISTINCT CASE WHEN a.status != 'in_progress' THEN a.id END) AS submitted_count
     FROM exams e LEFT JOIN exam_questions eq ON eq.exam_id=e.id
@@ -595,34 +457,27 @@ app.post('/api/admin/exams', requireAdmin, (req, res) => {
   if (!Number.isInteger(duration) || duration < 1 || duration > 1440) return apiError(res, 400, 'Duration must be between 1 and 1440 minutes.');
   if (showAnswers && !showScore) return apiError(res, 400, 'Show score must be enabled to show answer review.');
   if (!ids.length) return apiError(res, 400, 'Select at least one question for this exam.');
-  const available = db.prepare(`SELECT id, category FROM questions WHERE archived=0 AND id IN (${ids.map(() => '?').join(',')})`).all(...ids);
+  const available = db.prepare(`SELECT id, category, question_config FROM questions WHERE archived=0 AND id IN (${ids.map(() => '?').join(',')})`).all(...ids);
   if (available.length !== ids.length) return apiError(res, 400, 'One or more selected questions are no longer available. Refresh the question bank and try again.');
   const distinctCategories = [...new Set(available.map((question) => question.category).filter(Boolean))];
   const subject = subjectInput || distinctCategories.join(', ') || 'General';
   if (!subject) return apiError(res, 400, 'Subject is required.');
 
   if (status === 'published') {
-    const selectedQuestions = db.prepare(`SELECT id, media FROM questions WHERE id IN (${ids.map(() => '?').join(',')})`).all(...ids);
-    for (const q of selectedQuestions) {
-      if (q.media) {
-        try {
-          const parsed = JSON.parse(q.media);
-          if (parsed && parsed.placeholder) {
-            return apiError(res, 400, `Cannot publish examination: Question #${q.id} has an unresolved media placeholder. Please attach media before publishing.`);
-          }
-        } catch {}
-      }
-    }
+    const selectedQuestions = db.prepare(`SELECT id, media, question_config FROM questions WHERE id IN (${ids.map(() => '?').join(',')})`).all(...ids);
+    const problem = publishMediaProblem(selectedQuestions);
+    if (problem) return apiError(res, 400, `Cannot publish examination: ${problem}`);
   }
 
   const examId = db.transaction(() => {
     const created = db.prepare(`INSERT INTO exams (title, description, duration_minutes, status, show_score, show_answers, allow_pdf_download, subject, negative_mark)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(title, description, duration, status, showScore, showAnswers, allowPdfDownload, subject, negativeMark);
-    const addQuestion = db.prepare('INSERT INTO exam_questions (exam_id, question_id, marks, sort_order) VALUES (?, ?, 1, ?)');
-    ids.forEach((questionId, index) => addQuestion.run(created.lastInsertRowid, questionId, index));
+    const addQuestion = db.prepare('INSERT INTO exam_questions (exam_id, question_id, marks, sort_order) VALUES (?, ?, ?, ?)');
+    const marksById = new Map(available.map((q) => [q.id, Number(hydrateQuestionRow(q).question_config.default_marks) || 1]));
+    ids.forEach((questionId, index) => addQuestion.run(created.lastInsertRowid, questionId, marksById.get(questionId), index));
     return created.lastInsertRowid;
   })();
-  res.status(201).json(db.prepare(`SELECT e.*, COUNT(eq.id) AS question_count FROM exams e
+  res.status(201).json(db.prepare(`SELECT e.*, COUNT(eq.id) AS question_count, COALESCE(SUM(eq.marks),0) AS total_marks FROM exams e
     LEFT JOIN exam_questions eq ON eq.exam_id=e.id WHERE e.id=? GROUP BY e.id`).get(examId));
 });
 
@@ -647,17 +502,9 @@ app.patch('/api/admin/exams/:id/status', requireAdmin, (req, res) => {
   if (!['draft', 'published', 'closed'].includes(status)) return apiError(res, 400, 'Choose draft, published or closed.');
   const examId = Number(req.params.id);
   if (status === 'published') {
-    const examQuestionsList = db.prepare(`SELECT q.id, q.media FROM exam_questions eq JOIN questions q ON q.id=eq.question_id WHERE eq.exam_id=?`).all(examId);
-    for (const q of examQuestionsList) {
-      if (q.media) {
-        try {
-          const parsed = JSON.parse(q.media);
-          if (parsed && parsed.placeholder) {
-            return apiError(res, 400, `Cannot publish examination: Question #${q.id} has an unresolved media placeholder. Please attach media before publishing.`);
-          }
-        } catch {}
-      }
-    }
+    const examQuestionsList = db.prepare(`SELECT q.id, q.media, q.question_config FROM exam_questions eq JOIN questions q ON q.id=eq.question_id WHERE eq.exam_id=?`).all(examId);
+    const problem = publishMediaProblem(examQuestionsList);
+    if (problem) return apiError(res, 400, `Cannot publish examination: ${problem}`);
   }
   const result = db.prepare('UPDATE exams SET status = ? WHERE id = ?').run(status, examId);
   if (!result.changes) return apiError(res, 404, 'Exam not found.');
@@ -794,10 +641,11 @@ app.get('/api/attempts/:token', (req, res) => {
   let attempt = studentAttempt(token);
   if (!attempt) return apiError(res, 404, 'Attempt not found. Return to the exam list to start again.');
   const deadline = attemptDeadline(attempt);
-  const questions = examQuestions(attempt.exam_id).map((question) => hydrateQuestionRow(question, { includeAnswerKey: false }));
+  const rawQuestions = examQuestions(attempt.exam_id);
+  const questions = rawQuestions.map((question) => hydrateQuestionRow(question, { includeAnswerKey: false }));
   const answers = db.prepare('SELECT question_id, selected_option, answer_data FROM answers WHERE attempt_id=?')
     .all(attempt.id)
-    .map((row) => hydrateAnswerRow(row, { forActiveAttempt: true }));
+    .map((row) => hydrateAnswerRow(row, { forActiveAttempt: true, questionRow: rawQuestions.find((question) => question.id === row.question_id) }));
   res.json({
     id: attempt.id, exam_id: attempt.exam_id, exam_title: attempt.exam_title,
     student_name: attempt.student_name, roll_number: attempt.roll_number, email: attempt.email, address: attempt.address,
@@ -823,11 +671,17 @@ app.put('/api/attempts/:token/answers', (req, res) => {
     }
     return apiError(res, 400, 'That question is not part of this examination.');
   }
-  const validated = validateStudentAnswer(examQuestion, req.body || {});
+  const validated = validateStudentAnswer(examQuestion, req.body || {}, { publicOrderingIds: true });
   if (validated.error) return apiError(res, 400, validated.error);
-  db.prepare(`INSERT INTO answers (attempt_id, question_id, selected_option, answer_data) VALUES (?, ?, ?, ?)
+  const saved = db.prepare(`INSERT INTO answers (attempt_id, question_id, selected_option, answer_data)
+    SELECT a.id, ?, ?, ? FROM attempts a WHERE a.id=? AND a.status='in_progress'
+      AND julianday(a.started_at) + (SELECT duration_minutes FROM exams WHERE id=a.exam_id)/1440.0 > julianday('now')
     ON CONFLICT(attempt_id, question_id) DO UPDATE SET selected_option=excluded.selected_option, answer_data=excluded.answer_data, is_correct=NULL, marks_awarded=0`)
-    .run(attempt.id, questionId, validated.selected_option, validated.answerDataJson);
+    .run(questionId, validated.selected_option, validated.answerDataJson, attempt.id);
+  if (!saved.changes) {
+    enforceDeadline(attempt);
+    return apiError(res, 409, 'This attempt has already been submitted or its time has expired.');
+  }
   res.json({ ok: true });
 });
 

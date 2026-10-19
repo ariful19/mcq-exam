@@ -50,6 +50,20 @@
       "when": 1792195200000,
       "tag": "0006_yes_no_question_type",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1792368000000,
+      "tag": "0007_fill_blank_question_type",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1792368000001,
+      "tag": "0008_private_ordering_identifiers",
+      "breakpoints": true
     }
   ]
 }
