@@ -1170,3 +1170,134 @@ test('rich authored labels are safe and readable in plain summaries, while stude
     assert.ok(sheet.includes('<em>Because</em>'));
   } finally { cleanup(); }
 });
+
+function orderingPointerHarness(McqApp, pointerType = 'touch') {
+  const listeners = new Map();
+  const windowListeners = new Map();
+  const document = {
+    hidden: false,
+    addEventListener: (name, listener) => listeners.set(name, listener),
+    removeEventListener: (name, listener) => { if (listeners.get(name) === listener) listeners.delete(name); },
+    defaultView: {
+      addEventListener: (name, listener) => windowListeners.set(name, listener),
+      removeEventListener: (name, listener) => { if (windowListeners.get(name) === listener) windowListeners.delete(name); },
+    },
+  };
+  const rows = [0, 1, 2].map((index) => ({ getBoundingClientRect: () => ({ top: index * 60, bottom: (index + 1) * 60 }) }));
+  const list = { getBoundingClientRect: () => ({ left: 10, right: 310, top: 0, bottom: 180 }), querySelectorAll: () => rows };
+  let captured = null;
+  const handle = {
+    ownerDocument: document, disabled: false, isConnected: true,
+    closest: (selector) => selector === '.student-ordering-list' ? list : null,
+    setPointerCapture: (id) => { captured = id; }, hasPointerCapture: (id) => captured === id,
+    releasePointerCapture: (id) => { if (captured === id) captured = null; },
+  };
+  const question = { id: 81, question_type: 'ordering', question_config: { items: ['I1', 'I2', 'I3'].map((id) => ({ id, text: id })) } };
+  const order = ['I1', 'I2', 'I3'];
+  const app = new McqApp();
+  app.page = 'exam';
+  app.attempt = { id: 91, status: 'in_progress', questions: [question] };
+  app.answerDataByQuestion[question.id] = { order: [...order] };
+  const saved = [];
+  app.saveStructuredAnswer = (target, value) => { saved.push({ questionId: target.id, ...value }); app.answerDataByQuestion[target.id] = value; };
+  const event = (overrides = {}) => ({ pointerType, pointerId: 7, isPrimary: true, button: 0, clientX: 30, clientY: 30, currentTarget: handle, preventDefault() { this.prevented = true; }, ...overrides });
+  return { app, question, order, handle, document, listeners, windowListeners, saved, event, captured: () => captured };
+}
+
+test('touch and pen handle dragging commits exactly once on valid release without mutating answers during movement', async () => {
+  const { McqApp, cleanup } = await loadMcqAppClass();
+  try {
+    for (const pointerType of ['touch', 'pen']) {
+      const h = orderingPointerHarness(McqApp, pointerType);
+      assert.equal(h.app.startOrderingPointerDrag(h.event(), h.question, h.order, 0), true);
+      assert.equal(h.captured(), 7);
+      assert.deepEqual([...h.listeners.keys()].sort(), ['keydown', 'pointercancel', 'pointermove', 'pointerup', 'visibilitychange']);
+      h.listeners.get('pointermove')(h.event({ clientY: 150 }));
+      assert.equal(h.app.orderingPointerDrag.toIndex, 2);
+      assert.equal(h.saved.length, 0, 'Moving only highlights the destination');
+      assert.deepEqual(h.app.answerDataByQuestion[81].order, h.order);
+      const rendering = renderLitValue(h.app.renderStudentQuestionInput(h.question));
+      assert.ok(rendering.includes('data-ordering-drag-handle'));
+      assert.ok(rendering.includes('ordering-drag-source'));
+      assert.ok(rendering.includes('ordering-drop-target'));
+      assert.ok(rendering.includes('Move I1 up'));
+      h.listeners.get('pointerup')(h.event({ clientY: 150 }));
+      assert.deepEqual(h.saved, [{ questionId: 81, order: ['I2', 'I3', 'I1'] }]);
+      assert.equal(h.app.orderingPointerDrag, null);
+      assert.equal(h.listeners.size, 0);
+      assert.equal(h.windowListeners.size, 0);
+      assert.equal(h.captured(), null);
+      assert.equal(h.app.finishOrderingPointerDrag(h.event({ clientY: 150 })), false);
+      assert.equal(h.saved.length, 1, 'Duplicate pointerup must not resubmit');
+    }
+  } finally { cleanup(); }
+});
+
+test('touch drag cancels on pointercancel, lost capture, Escape, blur, hidden document, navigation or invalid release', async () => {
+  const { McqApp, cleanup } = await loadMcqAppClass();
+  try {
+    const cancellations = [
+      (h) => h.listeners.get('pointercancel')(h.event()),
+      (h) => h.app.cancelOrderingPointerDrag(h.event()), // lostpointercapture uses this handler
+      (h) => h.listeners.get('keydown')({ key: 'Escape', preventDefault() {} }),
+      (h) => h.windowListeners.get('blur')({ type: 'blur' }),
+      (h) => { h.document.hidden = true; h.listeners.get('visibilitychange')(); },
+      (h) => { h.app.currentQuestion = 1; h.listeners.get('pointerup')(h.event({ clientY: 150 })); },
+      (h) => { h.app.page = 'home'; h.listeners.get('pointermove')(h.event({ clientY: 150 })); },
+      (h) => { h.app.busy = true; h.listeners.get('pointerup')(h.event({ clientY: 150 })); },
+      (h) => { h.app.attempt.status = 'submitted'; h.listeners.get('pointerup')(h.event({ clientY: 150 })); },
+      (h) => h.listeners.get('pointerup')(h.event({ clientX: 400, clientY: 150 })),
+    ];
+    for (const cancel of cancellations) {
+      const h = orderingPointerHarness(McqApp);
+      h.app.startOrderingPointerDrag(h.event(), h.question, h.order, 0);
+      h.listeners.get('pointermove')(h.event({ clientY: 150 }));
+      cancel(h);
+      assert.equal(h.saved.length, 0);
+      assert.deepEqual(h.app.answerDataByQuestion[81].order, h.order);
+      assert.equal(h.app.orderingPointerDrag, null);
+      assert.equal(h.listeners.size, 0);
+      assert.equal(h.windowListeners.size, 0);
+    }
+    const tap = orderingPointerHarness(McqApp);
+    tap.app.startOrderingPointerDrag(tap.event(), tap.question, tap.order, 0);
+    tap.listeners.get('pointerup')(tap.event({ clientY: 33 }));
+    assert.equal(tap.saved.length, 0, 'A small tap below the movement threshold is not a drag');
+  } finally { cleanup(); }
+});
+
+test('ordering pointer guards preserve normal scrolling, native mouse drag and disabled answer state', async () => {
+  const { McqApp, cleanup } = await loadMcqAppClass();
+  try {
+    for (const overrides of [{ pointerType: 'mouse' }, { isPrimary: false }, { button: 2 }]) {
+      const h = orderingPointerHarness(McqApp);
+      const event = h.event(overrides);
+      assert.equal(h.app.startOrderingPointerDrag(event, h.question, h.order, 0), false);
+      assert.equal(event.prevented, undefined, 'Ignored pointers must not suppress scrolling or native mouse behavior');
+      assert.equal(h.listeners.size, 0);
+    }
+    const h = orderingPointerHarness(McqApp);
+    h.app.startOrderingPointerDrag(h.event(), h.question, h.order, 0);
+    const otherPointer = h.event({ pointerId: 8, clientY: 150 });
+    assert.equal(h.app.updateOrderingPointerDrag(otherPointer), false);
+    assert.equal(otherPointer.prevented, undefined);
+    assert.equal(h.app.finishOrderingPointerDrag(otherPointer), false);
+    assert.equal(h.app.cancelOrderingPointerDrag(otherPointer), false);
+    assert.equal(h.app.orderingPointerDrag.pointerId, 7);
+    h.app.cancelOrderingPointerDrag();
+    for (const field of ['busy', 'pendingAnswerSaves', 'submitConfirmOpen', 'questionMoving']) {
+      h.app[field] = true;
+      assert.equal(h.app.startOrderingPointerDrag(h.event(), h.question, h.order, 0), false);
+      assert.equal(h.app.moveOrderingAnswer(h.question, h.order, 0, 1), false);
+      const rendering = renderLitValue(h.app.renderStudentQuestionInput(h.question));
+      assert.ok(rendering.includes('draggable=false'));
+      h.app[field] = false;
+    }
+    assert.equal(h.app.moveOrderingAnswer(h.question, h.order, 0, 1), true, 'Accessible arrows use the same guarded save operation');
+    assert.deepEqual(h.saved.at(-1).order, ['I2', 'I1', 'I3']);
+    assert.ok(renderLitValue(h.app.renderStudentQuestionInput(h.question)).includes('draggable=true'), 'Native desktop dragging remains available');
+    const css = fs.readFileSync(path.join(root, 'client/src/style.css'), 'utf8');
+    assert.match(css, /\.student-ordering-row \.drag-handle\s*\{[^}]*touch-action:\s*none/s);
+    assert.ok(!/\.student-ordering-(?:row|list)\s*\{[^}]*touch-action:\s*none/s.test(css), 'Rows and surrounding list must remain scrollable');
+  } finally { cleanup(); }
+});

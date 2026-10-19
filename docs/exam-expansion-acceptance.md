@@ -11,7 +11,7 @@ The original `npm test` passed 35 tests, but none of these eleven issues satisfi
 | Issue | Changes and evidence | Closure condition |
 | --- | --- | --- |
 | #8 Fill blanks | Null/duplicate/malformed definitions rejected; NFC/length/per-blank case rules enforced; full/zero scoring; missing D1 constraint fixed by 0007; all-nine-type API and answer-review regressions. | Merge plus verification of applicable UI flow. |
-| #9 Rearrangement | Stable per-attempt Fisher–Yates shuffle, reload preservation, drag and keyboard/touch arrow controls; opaque public IDs and independent server ordering hide canonical sequence; migration 0008 preserves original IDs/keys/answers/scores. | Merge plus real desktop/touch browser verification. |
+| #9 Rearrangement | Stable per-attempt Fisher–Yates shuffle, reload preservation, desktop drag, touch/pen pointer drag and keyboard/touch arrow controls; opaque public IDs and independent server ordering hide canonical sequence; migration 0008 preserves original IDs/keys/answers/scores. | Merge plus real desktop/touch browser verification. |
 | #10 Rich text | Consistent sanitization for configuration choices as well as prompts; safe quoted attributes, newlines and math comparisons; safe author-text summaries and literal student text; rendering/model tests. | Merge plus applicable real-browser rendering verification. |
 | #11 Images | File-signature/MIME/size allowlist, immutable local and R2 adapters, constrained capability URLs, safe response headers/ranges, copy-on-write replacements, retention/backup/restore documentation and tests. | Merge, provision authorized hosted storage, then real target-host validation. |
 | #12 Audio | Teacher upload/replace/remove, format/size limits, native accessible loading/error/retry controls, byte-range playback, immutable shared media and no answer-key exposure. | Merge plus real target-host and desktop/mobile playback verification. |
@@ -20,9 +20,9 @@ The original `npm test` passed 35 tests, but none of these eleven issues satisfi
 | #15 Excel | Shared version 2 template with all nine examples/marks/formatting; legacy aliases; every populated question sheet checked; worksheet/row diagnostics; validation and injected storage errors roll back all writes. | Merge; automated backend acceptance passes. |
 | #16 Paste | Explicit version 2 header, legacy syntax, duplicate/unknown-line diagnostics, strict answer handling, copyable/downloadable nine-type examples, 300-block limit and atomic failure. | Merge; automated parser/API acceptance passes. |
 | #17 Post-import media | Pending filters/badges include shared media, upload clears pending state, preview/remove, historical copy-on-write, malformed/missing/pending assets block publish. | Merge plus applicable real-browser workflow verification; hosted media depends on #11/#12 setup. |
-| #18 Grading/regressions | Full nine-type Express/Worker matrix, negative marking/partial credit, visibility, raw-answer persistence, expired attempts, concurrent-submit CAS and save/deadline guards, archival/backup/migration coverage. | Merge, required migrations; automated backend acceptance passes. |
+| #18 Grading/regressions | Full nine-type Express/Worker matrix, negative marking/partial credit, visibility, raw-answer persistence, expired attempts, concurrent-submit CAS and save/deadline guards, archival/backup/migration coverage. | Merge the tested implementation and migrations; automated backend acceptance passes. Production rollout remains separate. |
 
-No issue was closed on the strength of local or unmerged edits. The pull request is a reviewable draft, not a deployment or merge authorization.
+No issue was closed on the strength of local or unmerged edits. The pull request is a reviewable draft, not a deployment or merge authorization. After verifying the tested changes are on the default branch, #15, #16 and #18 meet their automated acceptance conditions. Keep the remaining issues open until their applicable real-browser or target-host checks above are completed. Merging code does not authorize production migrations, bucket provisioning or deployment.
 
 ## Verification commands
 

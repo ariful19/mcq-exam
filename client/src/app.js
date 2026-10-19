@@ -114,6 +114,9 @@ export class McqApp extends LitElement {
     this.mediaStates = new Map();
     this.mediaRetries = new Map();
     this.orderingInitialState = {};
+    this.orderingPointerDrag = null;
+    this.orderingNativeDrag = null;
+    this.orderingDragNotice = '';
     this.questionPage = 0;
     this.pageSize = 14;
     this.questionFormOpen = false;
@@ -194,6 +197,7 @@ export class McqApp extends LitElement {
   }
 
   disconnectedCallback() {
+    this.cancelOrderingPointerDrag();
     super.disconnectedCallback();
     clearInterval(this.timer);
     clearTimeout(this.toastTimer);
@@ -203,6 +207,7 @@ export class McqApp extends LitElement {
   }
 
   updated() {
+    if (this.orderingPointerDrag && !this.canReorderQuestion(this.orderingPointerDrag.question)) this.cancelOrderingPointerDrag();
     const dialog = this.querySelector?.('.question-dialog');
     const previewDialog = this.querySelector?.('.question-preview-dialog');
     const shouldOpenEditor = this.questionFormOpen && this.page === 'admin' && this.adminTab === 'questions';
@@ -1164,6 +1169,8 @@ export class McqApp extends LitElement {
   }
 
   async loadAttempt(token, expectedExamId = '') {
+    this.cancelOrderingPointerDrag();
+    this.orderingNativeDrag = null;
     const result = await api(`/api/attempts/${encodeURIComponent(token)}`);
     if (expectedExamId && String(result.exam_id) !== String(expectedExamId)) {
       if (typeof sessionStorage !== 'undefined') sessionStorage.removeItem('mcq-attempt-token');
@@ -1268,6 +1275,8 @@ export class McqApp extends LitElement {
 
   async submitAttempt(auto = false) {
     if (!this.attempt || this.attempt.status !== 'in_progress' || this.busy) return;
+    this.cancelOrderingPointerDrag();
+    this.orderingNativeDrag = null;
     if (!auto) {
       this.submitConfirmOpen = true;
       this.requestUpdate();
@@ -1300,6 +1309,8 @@ export class McqApp extends LitElement {
   }
 
   newAttempt() {
+    this.cancelOrderingPointerDrag();
+    this.orderingNativeDrag = null;
     clearInterval(this.timer);
     if (typeof sessionStorage !== 'undefined') sessionStorage.removeItem('mcq-attempt-token');
     this.resumeToken = '';
@@ -1328,6 +1339,9 @@ export class McqApp extends LitElement {
 
   async goToQuestion(index) {
     if (this.questionMoving || index === this.currentQuestion || index < 0 || index >= this.attempt.questions.length) return;
+    this.cancelOrderingPointerDrag();
+    this.orderingNativeDrag = null;
+    this.orderingDragNotice = '';
     this.questionMoving = true;
     try {
       await slideQuestion(this.querySelector?.('.question-content'), Math.sign(index - this.currentQuestion), async () => {
@@ -2372,6 +2386,121 @@ export class McqApp extends LitElement {
     </div>`;
   }
 
+  canReorderQuestion(question) {
+    return this.page === 'exam' && !this.busy && !this.pendingAnswerSaves && !this.submitConfirmOpen && !this.questionMoving
+      && this.attempt?.status === 'in_progress'
+      && this.attempt?.questions?.[this.currentQuestion]?.id === question.id;
+  }
+
+  moveOrderingAnswer(question, order, fromIndex, toIndex) {
+    if (!this.canReorderQuestion(question) || this.orderingPointerDrag
+      || !Number.isInteger(fromIndex) || !Number.isInteger(toIndex)
+      || fromIndex < 0 || toIndex < 0 || fromIndex >= order.length || toIndex >= order.length || fromIndex === toIndex) return false;
+    const ids = (question.question_config?.items || []).map((item) => item.id);
+    if (order.length !== ids.length || new Set(order).size !== ids.length || !order.every((id) => ids.includes(id))) return false;
+    const nextOrder = [...order];
+    const [item] = nextOrder.splice(fromIndex, 1);
+    nextOrder.splice(toIndex, 0, item);
+    this.orderingDragNotice = `Item moved to position ${toIndex + 1} of ${order.length}.`;
+    this.saveStructuredAnswer(question, { order: nextOrder });
+    return true;
+  }
+
+  startOrderingPointerDrag(event, question, order, fromIndex) {
+    // Mouse users keep native HTML5 dragging. Touch and pen start only on the handle.
+    if (!['touch', 'pen'].includes(event.pointerType) || event.isPrimary === false || event.button !== 0
+      || this.orderingPointerDrag || !this.canReorderQuestion(question) || !Array.isArray(order) || !Number.isInteger(fromIndex)) return false;
+    const handle = event.currentTarget;
+    const list = handle?.closest?.('.student-ordering-list');
+    const document = handle?.ownerDocument;
+    if (handle?.disabled || !list || !document?.addEventListener || fromIndex < 0 || fromIndex >= order.length) return false;
+    event.preventDefault();
+    const drag = {
+      pointerId: event.pointerId, question, attemptId: this.attempt.id, order: [...order], fromIndex, toIndex: fromIndex,
+      startX: event.clientX, startY: event.clientY, moved: false, inside: true, handle, list, document,
+      move: (next) => this.updateOrderingPointerDrag(next),
+      finish: (next) => this.finishOrderingPointerDrag(next),
+      cancel: (next) => this.cancelOrderingPointerDrag(next),
+      keydown: (next) => { if (next.key === 'Escape') { next.preventDefault(); this.cancelOrderingPointerDrag(); } },
+      visibility: () => { if (document.hidden) this.cancelOrderingPointerDrag(); },
+    };
+    this.orderingNativeDrag = null;
+    this.orderingPointerDrag = drag;
+    this.orderingDragNotice = 'Drag to another position, then release. Escape cancels.';
+    document.addEventListener('pointermove', drag.move, { passive: false });
+    document.addEventListener('pointerup', drag.finish);
+    document.addEventListener('pointercancel', drag.cancel);
+    document.addEventListener('keydown', drag.keydown);
+    document.addEventListener('visibilitychange', drag.visibility);
+    document.defaultView?.addEventListener('blur', drag.cancel);
+    try { handle.setPointerCapture?.(event.pointerId); } catch { /* Document listeners also track browsers without capture. */ }
+    this.requestUpdate();
+    return true;
+  }
+
+  updateOrderingPointerDrag(event) {
+    const drag = this.orderingPointerDrag;
+    if (!drag || event.pointerId !== drag.pointerId) return false;
+    if (!this.canReorderQuestion(drag.question) || this.attempt.id !== drag.attemptId || drag.handle.isConnected === false) {
+      this.cancelOrderingPointerDrag();
+      return false;
+    }
+    event.preventDefault?.();
+    if (!Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return false;
+    if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 6) return false;
+    const bounds = drag.list.getBoundingClientRect();
+    const inside = event.clientX >= bounds.left && event.clientX <= bounds.right
+      && event.clientY >= bounds.top && event.clientY <= bounds.bottom;
+    let target = drag.fromIndex;
+    if (inside) {
+      let distance = Infinity;
+      Array.from(drag.list.querySelectorAll('.student-ordering-row')).forEach((row, index) => {
+        const box = row.getBoundingClientRect();
+        const nextDistance = Math.abs(event.clientY - (box.top + box.bottom) / 2);
+        if (nextDistance < distance) { target = index; distance = nextDistance; }
+      });
+    }
+    const changed = !drag.moved || drag.inside !== inside || drag.toIndex !== target;
+    drag.moved = true;
+    drag.inside = inside;
+    drag.toIndex = target;
+    if (changed) {
+      this.orderingDragNotice = inside ? `Release to move to position ${target + 1} of ${drag.order.length}.` : 'Outside the list. Release to cancel.';
+      this.requestUpdate();
+    }
+    return true;
+  }
+
+  finishOrderingPointerDrag(event) {
+    const drag = this.orderingPointerDrag;
+    if (!drag || event.pointerId !== drag.pointerId) return false;
+    this.updateOrderingPointerDrag(event);
+    if (this.orderingPointerDrag !== drag) return false;
+    const commit = drag.moved && drag.inside && this.canReorderQuestion(drag.question)
+      && this.attempt.id === drag.attemptId && drag.toIndex !== drag.fromIndex;
+    this.cancelOrderingPointerDrag(null, { announce: false });
+    if (commit) return this.moveOrderingAnswer(drag.question, drag.order, drag.fromIndex, drag.toIndex);
+    this.orderingDragNotice = 'Order unchanged.';
+    this.requestUpdate();
+    return false;
+  }
+
+  cancelOrderingPointerDrag(event = null, { announce = true } = {}) {
+    const drag = this.orderingPointerDrag;
+    if (!drag || (event?.pointerId !== undefined && event.pointerId !== drag.pointerId)) return false;
+    this.orderingPointerDrag = null;
+    drag.document.removeEventListener('pointermove', drag.move);
+    drag.document.removeEventListener('pointerup', drag.finish);
+    drag.document.removeEventListener('pointercancel', drag.cancel);
+    drag.document.removeEventListener('keydown', drag.keydown);
+    drag.document.removeEventListener('visibilitychange', drag.visibility);
+    drag.document.defaultView?.removeEventListener('blur', drag.cancel);
+    try { if (drag.handle.hasPointerCapture?.(drag.pointerId)) drag.handle.releasePointerCapture(drag.pointerId); } catch { /* The browser may have canceled capture already. */ }
+    if (announce) this.orderingDragNotice = 'Reordering canceled. Order unchanged.';
+    this.requestUpdate();
+    return true;
+  }
+
   initialOrderingIds(question) {
     const ids = (question.question_config?.items || []).map((item) => item.id);
     const validOrder = (order) => Array.isArray(order) && order.length === ids.length && new Set(order).size === ids.length && order.every((id) => ids.includes(id));
@@ -2551,52 +2680,58 @@ export class McqApp extends LitElement {
 
     if (qType === QUESTION_TYPES.ORDERING) {
       const items = Array.isArray(qConfig.items) ? qConfig.items : [];
-      const itemMap = new Map(items.map((i) => [i.id, i]));
+      const itemMap = new Map(items.map((item) => [item.id, item]));
       const initialOrder = this.initialOrderingIds(question);
       const currentOrder = Array.isArray(currentData.order) && currentData.order.length === items.length && new Set(currentData.order).size === items.length && currentData.order.every((id) => itemMap.has(id))
-        ? currentData.order
-        : initialOrder;
-
+        ? currentData.order : initialOrder;
+      const disabled = !this.canReorderQuestion(question);
+      const drag = this.orderingPointerDrag?.question.id === question.id ? this.orderingPointerDrag : null;
+      const statusId = `ordering-status-${question.id}`;
       return html`
-        <p class="question-hint">Drag and drop or use the arrows to arrange the items into the correct order</p>
+        <p class="question-hint">Drag an item's handle with touch or pen, drag a row with a mouse, or use the Up/Down arrows to arrange the items.</p>
+        <p class="ordering-drag-status" id=${statusId} role="status" aria-live="polite">${this.orderingDragNotice}</p>
         <div class="student-ordering-list" role="list">
-          ${currentOrder.map((id, idx) => {
+          ${currentOrder.map((id, index) => {
             const item = itemMap.get(id) || { id, text: '' };
-            return html`<div class="student-ordering-row"
-              role="listitem"
-              draggable="true"
-              @dragstart=${(e) => {
-                e.dataTransfer.setData('text/plain', String(idx));
-                e.dataTransfer.effectAllowed = 'move';
+            const dragging = drag?.fromIndex === index;
+            const target = drag?.moved && drag.inside && drag.toIndex === index && drag.fromIndex !== index;
+            return html`<div class="student-ordering-row ${dragging ? 'ordering-drag-source' : ''} ${target ? 'ordering-drop-target' : ''}"
+              role="listitem" data-ordering-id=${id} data-ordering-index=${index} draggable=${String(!disabled && !drag)}
+              @dragstart=${(event) => {
+                if (disabled || drag || !this.canReorderQuestion(question) || !event.dataTransfer) { event.preventDefault(); return; }
+                this.orderingNativeDrag = { questionId: question.id, attemptId: this.attempt.id, fromIndex: index, order: [...currentOrder] };
+                event.dataTransfer.setData('text/plain', String(index));
+                event.dataTransfer.effectAllowed = 'move';
               }}
-              @dragover=${(e) => {
-                e.preventDefault();
-                e.dataTransfer.dropEffect = 'move';
+              @dragend=${() => { this.orderingNativeDrag = null; }}
+              @dragover=${(event) => {
+                if (this.orderingNativeDrag?.questionId !== question.id || !this.canReorderQuestion(question)) return;
+                event.preventDefault();
+                if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
               }}
-              @drop=${(e) => {
-                e.preventDefault();
-                const fromIdx = Number(e.dataTransfer.getData('text/plain'));
-                if (Number.isInteger(fromIdx) && fromIdx !== idx && fromIdx >= 0 && fromIdx < currentOrder.length) {
-                  const nextOrder = [...currentOrder];
-                  const [moved] = nextOrder.splice(fromIdx, 1);
-                  nextOrder.splice(idx, 0, moved);
-                  this.saveStructuredAnswer(question, { order: nextOrder });
-                }
+              @drop=${(event) => {
+                event.preventDefault();
+                const source = this.orderingNativeDrag;
+                this.orderingNativeDrag = null;
+                if (source?.questionId === question.id && source.attemptId === this.attempt?.id) this.moveOrderingAnswer(question, source.order, source.fromIndex, index);
               }}>
-              <span class="drag-handle" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
-              <span class="option-letter">${idx + 1}</span>
+              <button type="button" class="drag-handle" data-ordering-drag-handle
+                title="Drag to reorder" aria-label=${`Drag ${plainRichText(item.text)} to reorder, or use Up and Down controls`}
+                aria-describedby=${statusId} aria-pressed=${String(Boolean(dragging))} ?disabled=${disabled || Boolean(drag && !dragging)}
+                @pointerdown=${(event) => this.startOrderingPointerDrag(event, question, currentOrder, index)}
+                @lostpointercapture=${(event) => this.cancelOrderingPointerDrag(event)}
+                @keydown=${(event) => {
+                  if (event.key === 'Escape') this.cancelOrderingPointerDrag();
+                  else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+                    event.preventDefault();
+                    this.moveOrderingAnswer(question, currentOrder, index, index + (event.key === 'ArrowUp' ? -1 : 1));
+                  }
+                }}>⋮⋮</button>
+              <span class="option-letter">${index + 1}</span>
               <span class="option-text">${unsafeHTML(sanitizeRichText(item.text))}</span>
               <div class="order-move-controls">
-                <button type="button" class="icon-move-btn" aria-label="Move ${plainRichText(item.text)} up" ?disabled=${idx === 0} @click=${() => {
-                  const nextOrder = [...currentOrder];
-                  [nextOrder[idx - 1], nextOrder[idx]] = [nextOrder[idx], nextOrder[idx - 1]];
-                  this.saveStructuredAnswer(question, { order: nextOrder });
-                }}>↑</button>
-                <button type="button" class="icon-move-btn" aria-label="Move ${plainRichText(item.text)} down" ?disabled=${idx === currentOrder.length - 1} @click=${() => {
-                  const nextOrder = [...currentOrder];
-                  [nextOrder[idx + 1], nextOrder[idx]] = [nextOrder[idx], nextOrder[idx + 1]];
-                  this.saveStructuredAnswer(question, { order: nextOrder });
-                }}>↓</button>
+                <button type="button" class="icon-move-btn" aria-label="Move ${plainRichText(item.text)} up" ?disabled=${disabled || Boolean(drag) || index === 0} @click=${() => this.moveOrderingAnswer(question, currentOrder, index, index - 1)}>↑</button>
+                <button type="button" class="icon-move-btn" aria-label="Move ${plainRichText(item.text)} down" ?disabled=${disabled || Boolean(drag) || index === currentOrder.length - 1} @click=${() => this.moveOrderingAnswer(question, currentOrder, index, index + 1)}>↓</button>
               </div>
             </div>`;
           })}

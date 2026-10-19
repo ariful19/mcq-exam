@@ -31,6 +31,57 @@ async function shot(page, name) { await page.screenshot({ path: path.join(artifa
 async function responseJson(response, status = 200) { assert.equal(response.status(), status, await response.text()); return response.json(); }
 async function waitSaved(page) { await page.waitForFunction(() => { const app = document.querySelector('mcq-app'); return app && !app.pendingAnswerSaves && !app.answerSaveError; }); }
 async function questionNav(page, index) { await page.locator('.question-nav-item').nth(index).click(); await page.waitForFunction((index) => { const app = document.querySelector('mcq-app'); return app.currentQuestion === index && !app.questionMoving; }, index); }
+/** Use Chromium's input pipeline rather than dispatching untrusted JS PointerEvents.
+ * This exercises emulated touch/pointer capture, not a physical touch device.
+ */
+async function orderingTouchGesture(context, page, { cancel = false } = {}) {
+  const list = page.locator('.student-ordering-list');
+  const rows = page.locator('.student-ordering-row[data-ordering-id]');
+  await list.scrollIntoViewIfNeeded();
+  const handle = rows.first().locator('[data-ordering-drag-handle]');
+  const from = await handle.boundingBox();
+  const to = await rows.last().boundingBox();
+  assert.ok(from && to, 'Touch drag source handle and destination row must be visible');
+  const before = await rows.locator('.option-text').allTextContents();
+  const start = { x: from.x + from.width / 2, y: from.y + from.height / 2 };
+  const session = await context.newCDPSession(page);
+  let saveRequests = 0;
+  let touching = false;
+  const trackSave = (request) => {
+    if (request.method() === 'PUT' && /\/api\/attempts\/[^/]+\/answers$/.test(new URL(request.url()).pathname)) saveRequests += 1;
+  };
+  page.on('request', trackSave);
+  try {
+    await session.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ ...start, id: 1, radiusX: 4, radiusY: 4, force: 1 }] });
+    touching = true;
+    for (let step = 1; step <= 8; step++) {
+      const ratio = step / 8;
+      // A wrapping live-status message may move the list while a drag is active.
+      const target = await rows.last().boundingBox();
+      assert.ok(target, 'Drop target remains visible while dragging');
+      const end = { x: start.x, y: target.y + target.height / 2 };
+      await session.send('Input.dispatchTouchEvent', {
+        type: 'touchMove',
+        touchPoints: [{ x: start.x + (end.x - start.x) * ratio, y: start.y + (end.y - start.y) * ratio, id: 1, radiusX: 4, radiusY: 4, force: 1 }],
+      });
+    }
+    assert.deepEqual(await rows.locator('.option-text').allTextContents(), before, 'Dragging previews the target without changing the saved order');
+    assert.equal(saveRequests, 0, 'Pointer movement must not issue intermediate answer saves');
+    await session.send('Input.dispatchTouchEvent', { type: cancel ? 'touchCancel' : 'touchEnd', touchPoints: [] });
+    touching = false;
+    if (!cancel) {
+      const expected = [...before.slice(1), before[0]];
+      await page.waitForFunction((expected) => [...document.querySelectorAll('.student-ordering-row .option-text')].map((item) => item.textContent).join('|') === expected.join('|'), expected);
+    }
+    await waitSaved(page);
+    assert.equal(saveRequests, cancel ? 0 : 1, 'Only a committed touch drop saves one answer');
+    return before;
+  } finally {
+    if (touching) await session.send('Input.dispatchTouchEvent', { type: 'touchCancel', touchPoints: [] }).catch(() => {});
+    page.off('request', trackSave);
+    await session.detach();
+  }
+}
 async function begin(page, base, exam, name) {
   await page.goto(`${base}/exam/${exam.id}`);
   await page.locator('[name=student_name]').fill(name);
@@ -225,14 +276,22 @@ try {
   await phone.getByRole('button', { name: `Move ${mobileOrder[0]} down`, exact: true }).tap(); await waitSaved(phone);
   const afterTap = await phone.locator('.student-ordering-row .option-text').allTextContents(); assert.deepEqual(afterTap, [mobileOrder[1], mobileOrder[0], mobileOrder[2]]);
   await phone.reload(); await phone.locator('.exam-player').waitFor(); await questionNav(phone, 3); assert.deepEqual(await phone.locator('.student-ordering-row .option-text').allTextContents(), afterTap);
+  await orderingTouchGesture(mobile, phone, { cancel: true });
+  assert.deepEqual(await phone.locator('.student-ordering-row .option-text').allTextContents(), afterTap, 'Cancelled touch drag leaves order unchanged');
+  await orderingTouchGesture(mobile, phone);
+  const afterTouchDrag = [afterTap[1], afterTap[2], afterTap[0]];
+  assert.deepEqual(await phone.locator('.student-ordering-row .option-text').allTextContents(), afterTouchDrag);
+  await phone.reload(); await phone.locator('.exam-player').waitFor(); await questionNav(phone, 3);
+  assert.deepEqual(await phone.locator('.student-ordering-row .option-text').allTextContents(), afterTouchDrag, 'Emulated touch drag persists across reload');
+  await shot(phone, 'mobile-emulated-touch-drag-ordering');
   const dimensions = await phone.evaluate(() => ({ width: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth })); assert.ok(dimensions.scroll <= dimensions.width + 1, `Mobile horizontal overflow: ${JSON.stringify(dimensions)}`);
   await shot(phone, 'mobile-touch-ordering');
   await questionNav(phone, 0); assert.equal(await phone.getByRole('textbox', { name: 'City', exact: true }).inputValue(), 'Dhaka'); await shot(phone, 'mobile-fillblank-and-stimulus');
   await questionNav(phone, 2); await phone.waitForFunction(() => [...document.querySelectorAll('.question-content audio')].every((audio) => audio.readyState >= 1)); await shot(phone, 'mobile-audio-stimulus');
-  finishStage('Mobile touch context: fill blanks, arrow-tap reorder fallback, reload persistence, media and no horizontal overflow');
+  finishStage('Mobile emulation: touch drag commits once, touch cancellation preserves order, arrow-tap fallback, reload persistence, media and no horizontal overflow');
   assert.deepEqual(pageErrors, [], 'No unhandled browser JS exceptions');
   finishStage('Zero unhandled browser JavaScript exceptions');
-  fs.writeFileSync(path.join(artifacts, 'results.json'), JSON.stringify({ browser: browser.version(), passed: stages, artifacts, limits: ['Headless Chromium on cloud workspace; mobile viewport and touch emulation, not physical hardware.', 'Local Express backend; no live deployed Worker/browser/network check.', 'External media reliability and all device/browser combinations are not exercised.'] }, null, 2));
+  fs.writeFileSync(path.join(artifacts, 'results.json'), JSON.stringify({ browser: browser.version(), passed: stages, artifacts, limits: ['Headless Chromium on cloud workspace; mobile viewport and CDP-emulated touch/pointer gestures, not physical hardware or OS touch drivers.', 'Local Express backend; no live deployed Worker/browser/network check.', 'External media reliability and all device/browser combinations are not exercised.'] }, null, 2));
   console.log(`Screenshots and JSON: ${artifacts}`);
 } catch (error) {
   console.error(error);
